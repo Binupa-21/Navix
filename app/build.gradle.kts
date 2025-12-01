@@ -49,9 +49,12 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     implementation("io.github.sceneview:arsceneview:0.10.0")
-    // This "Platform" line tells Gradle which versions to use automatically
-    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
+    // Import the Firebase BoM (Bill of Materials)
+    implementation(platform("com.google.firebase:firebase-bom:32.8.0"))
 
 // Now we can add the library without a version number, and it will work
     implementation("com.google.firebase:firebase-firestore-ktx")
+
+// Add the library for Firestore (The Database)
+    implementation("com.google.firebase:firebase-firestore")
 }

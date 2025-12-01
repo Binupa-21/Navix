@@ -1,5 +1,4 @@
 package com.navix.app
-
 import android.os.Bundle
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -28,6 +27,23 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // ... inside onCreate ...
+        setContentView(R.layout.activity_main)
+        sceneView = findViewById(R.id.sceneView) // Your existing line
+
+// --- TEST FIREBASE ---
+        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+        val testData = hashMapOf("message" to "Hello from NaviX Team 03!")
+
+        db.collection("test_connection").add(testData)
+            .addOnSuccessListener {
+                android.widget.Toast.makeText(this, "Firebase Connected!", android.widget.Toast.LENGTH_LONG).show()
+            }
+            .addOnFailureListener { e ->
+                android.widget.Toast.makeText(this, "Error: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+// ---------------------
 
         // 1. Link UI elements
         sceneView = findViewById(R.id.sceneView)

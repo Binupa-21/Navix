@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "691424392856",
+    "project_id": "navix-704dc",
+    "storage_bucket": "navix-704dc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:691424392856:android:3a46e0b58e7e05fef882ed",
+        "android_client_info": {
+          "package_name": "com.navix.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCmC4AbeEg02w9zmYLrpcGWcCPuWn_c0lM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
