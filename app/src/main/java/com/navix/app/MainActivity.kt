@@ -3,14 +3,18 @@ package com.navix.app
 import android.os.Bundle
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import io.github.sceneview.ar.ArSceneView
-// We removed CubeNode imports to fix your error
+import io.github.sceneview.ar.node.ArModelNode
+import io.github.sceneview.math.Position
 
 class MainActivity : AppCompatActivity() {
 
     lateinit var sceneView: ArSceneView
+    private lateinit var modelNode: ArModelNode
     val db = FirebaseFirestore.getInstance()
+    private var lastNodeId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -18,43 +22,69 @@ class MainActivity : AppCompatActivity() {
 
         sceneView = findViewById(R.id.sceneView)
 
-        // The Listener for Version 0.10.0
-        sceneView.onTapAr = { hitResult, _ ->
+        modelNode = ArModelNode(sceneView.engine).apply {
+            loadModelGlbAsync(
+                glbFileLocation = "models/sphere.glb",
+                centerOrigin = Position(y = -0.5f), // Places the origin at the bottom of the sphere
+                onLoaded = { _ ->
+                    Toast.makeText(this@MainActivity, "Model Loaded Successfully", Toast.LENGTH_SHORT).show()
+                    sceneView.planeRenderer.isEnabled = false
+                },
+                onError = { exception ->
+                    Toast.makeText(this@MainActivity, "Failed to load model: $exception", Toast.LENGTH_LONG).show()
+                }
+            )
+        }
 
-            // 1. Create an Anchor (An invisible point in the real world)
+        sceneView.onTapAr = { hitResult, _ ->
+            // Create an anchor from the tap
             val anchor = hitResult.createAnchor()
 
-            // 2. Get the Coordinates (x, y, z)
+            // Clone the pre-loaded model and add it to the scene
+            modelNode.clone().let {
+                it.anchor = anchor
+                sceneView.addChild(it)
+            }
+
+            // Get the coordinates for the database
             val pose = anchor.pose
             val x = pose.tx()
             val y = pose.ty()
             val z = pose.tz()
 
-            // 3. Create the Data Object
             val nodeId = "node_" + System.currentTimeMillis()
-            val newNode = com.navix.app.Node(
+            val nodeData = Node(
                 id = nodeId,
                 x = x,
                 y = y,
-                z = z
+                z = z,
+                neighbors = mutableListOf()
             )
 
-            // 4. Upload to Firebase
-            uploadNodeToCloud(newNode)
+            chainAndUpdateNode(nodeData)
 
-            // 5. Show a Popup so you know it worked
-            Toast.makeText(this, "Saved Point: $x, $y, $z", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Saved Point: $nodeId", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun uploadNodeToCloud(node: com.navix.app.Node) {
-        db.collection("maps")
-            .document("floor_1")
-            .collection("nodes")
-            .document(node.id)
-            .set(node)
-            .addOnFailureListener { e ->
-                Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-            }
+    private fun chainAndUpdateNode(newNode: Node) {
+        val nodeDocument = db.collection("maps").document("floor_1")
+            .collection("nodes").document(newNode.id)
+
+        nodeDocument.set(newNode).addOnFailureListener { e ->
+            Toast.makeText(this, "Error saving node: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+
+        lastNodeId?.let {
+            val lastNodeDocument = db.collection("maps").document("floor_1")
+                .collection("nodes").document(it)
+
+            lastNodeDocument.update("neighbors", FieldValue.arrayUnion(newNode.id))
+                .addOnFailureListener { e ->
+                    Toast.makeText(this, "Error updating previous node: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+        }
+
+        lastNodeId = newNode.id
     }
 }
