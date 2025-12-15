@@ -8,6 +8,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import io.github.sceneview.ar.ArSceneView
 import io.github.sceneview.ar.node.ArModelNode
 import io.github.sceneview.math.Position
+import com.navix.app.Node
 
 class MainActivity : AppCompatActivity() {
 
@@ -61,7 +62,7 @@ class MainActivity : AppCompatActivity() {
                     x = x,
                     y = y,
                     z = z,
-                    neighbors = mutableListOf()
+                    neighbors = listOf()
                 )
 
                 chainAndUpdateNode(nodeData)
@@ -94,3 +95,4 @@ class MainActivity : AppCompatActivity() {
         lastNodeId = newNode.id
     }
 }
+

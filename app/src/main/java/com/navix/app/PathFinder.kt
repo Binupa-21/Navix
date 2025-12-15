@@ -1,45 +1,72 @@
 package com.navix.app
 
+import com.navix.app.Node
 import java.util.PriorityQueue
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 class PathFinder {
 
-    fun findPath(startNode: Node, endNode: Node, allNodes: List<Node>): List<Node> {
-        val nodeMap = allNodes.associateBy { it.id }
+    // Helper class to store A* scores without messing up your main Node data
+    data class PathNode(
+        val node: Node,
+        var gCost: Float = Float.MAX_VALUE, // Distance from start
+        var hCost: Float = 0f,              // Estimated distance to end
+        var parent: PathNode? = null        // The previous node (bread crumbs)
+    ) {
+        val fCost: Float
+            get() = gCost + hCost
+    }
 
-        val gScore = mutableMapOf<Node, Double>()
-        val fScore = mutableMapOf<Node, Double>()
+    // THE MAIN ALGORITHM
+    fun findPath(allNodes: List<Node>, startId: String, targetId: String): List<Node> {
 
-        val openSet = PriorityQueue<Node> { n1, n2 ->
-            val score1 = fScore.getOrDefault(n1, Double.MAX_VALUE)
-            val score2 = fScore.getOrDefault(n2, Double.MAX_VALUE)
-            score1.compareTo(score2)
-        }
+        // 1. Find the Start and Target objects in your list
+        val startNodeData = allNodes.find { it.id == startId } ?: return emptyList()
+        val targetNodeData = allNodes.find { it.id == targetId } ?: return emptyList()
 
-        gScore[startNode] = 0.0
-        fScore[startNode] = heuristic(startNode, endNode)
+        // 2. Wrap all Nodes into "PathNodes" to track costs
+        val pathNodeMap = allNodes.associate { it.id to PathNode(it) }
+
+        val startNode = pathNodeMap[startId]!!
+        val targetNode = pathNodeMap[targetId]!!
+
+        // 3. Setup the Open Set (Nodes to be checked) and Closed Set (Nodes already checked)
+        val openSet = PriorityQueue<PathNode> { a, b -> a.fCost.compareTo(b.fCost) }
+        val closedSet = HashSet<PathNode>()
+
+        // Initialize Start
+        startNode.gCost = 0f
+        startNode.hCost = calculateDistance(startNode.node, targetNode.node)
         openSet.add(startNode)
 
-        val cameFrom = mutableMapOf<Node, Node>()
-
+        // 4. Loop until we find the target
         while (openSet.isNotEmpty()) {
-            val current = openSet.poll() ?: break
+            val current = openSet.poll()
 
-            if (current.id == endNode.id) {
-                return reconstructPath(cameFrom, current)
+            // FOUND IT! Retrace steps
+            if (current.node.id == targetId) {
+                return reconstructPath(current)
             }
 
-            val neighbors = current.neighbors.mapNotNull { neighborId -> nodeMap[neighborId] }
+            closedSet.add(current)
 
-            for (neighbor in neighbors) {
-                val tentativeGScore = gScore.getOrDefault(current, Double.MAX_VALUE) + distanceBetween(current, neighbor)
-                
-                if (tentativeGScore < gScore.getOrDefault(neighbor, Double.MAX_VALUE)) {
-                    cameFrom[neighbor] = current
-                    gScore[neighbor] = tentativeGScore
-                    fScore[neighbor] = tentativeGScore + heuristic(neighbor, endNode)
-                    if (neighbor !in openSet) {
+            // Check all neighbors
+            for (neighborId in current.node.neighbors) {
+                val neighbor = pathNodeMap[neighborId] ?: continue // Skip if neighbor missing
+
+                if (closedSet.contains(neighbor)) continue // Skip if already checked
+
+                // Calculate cost to move to this neighbor
+                val newMovementCost = current.gCost + calculateDistance(current.node, neighbor.node)
+
+                // If this path is shorter than the previous best path to this neighbor
+                if (newMovementCost < neighbor.gCost || !openSet.contains(neighbor)) {
+                    neighbor.gCost = newMovementCost
+                    neighbor.hCost = calculateDistance(neighbor.node, targetNode.node)
+                    neighbor.parent = current // Mark where we came from
+
+                    if (!openSet.contains(neighbor)) {
                         openSet.add(neighbor)
                     }
                 }
@@ -49,24 +76,23 @@ class PathFinder {
         return emptyList() // No path found
     }
 
-    private fun distanceBetween(node1: Node, node2: Node): Double {
-        val dx = (node1.x - node2.x).toDouble()
-        val dy = (node1.y - node2.y).toDouble()
-        val dz = (node1.z - node2.z).toDouble()
-        return sqrt(dx * dx + dy * dy + dz * dz)
+    // MATH: Calculate 3D distance between two nodes
+    private fun calculateDistance(a: Node, b: Node): Float {
+        return sqrt(
+            (a.x - b.x).pow(2) +
+                    (a.y - b.y).pow(2) +
+                    (a.z - b.z).pow(2)
+        )
     }
 
-    private fun heuristic(node: Node, endNode: Node): Double {
-        return distanceBetween(node, endNode)
-    }
-
-    private fun reconstructPath(cameFrom: Map<Node, Node>, current: Node): List<Node> {
-        val totalPath = mutableListOf(current)
-        var currentTrace = current
-        while (cameFrom.containsKey(currentTrace)) {
-            currentTrace = cameFrom[currentTrace]!!
-            totalPath.add(0, currentTrace)
+    // Helper: Walk backwards from End -> Start to build the final list
+    private fun reconstructPath(endNode: PathNode): List<Node> {
+        val path = ArrayList<Node>()
+        var current: PathNode? = endNode
+        while (current != null) {
+            path.add(current.node)
+            current = current.parent
         }
-        return totalPath
+        return path.reversed() // Flip it so it goes Start -> End
     }
 }
