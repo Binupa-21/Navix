@@ -15,6 +15,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var modelNode: ArModelNode
     val db = FirebaseFirestore.getInstance()
     private var lastNodeId: String? = null
+    private var isModelLoaded = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,6 +30,7 @@ class MainActivity : AppCompatActivity() {
                 onLoaded = { _ ->
                     Toast.makeText(this@MainActivity, "Model Loaded Successfully", Toast.LENGTH_SHORT).show()
                     sceneView.planeRenderer.isEnabled = false
+                    isModelLoaded = true
                 },
                 onError = { exception ->
                     Toast.makeText(this@MainActivity, "Failed to load model: $exception", Toast.LENGTH_LONG).show()
@@ -37,33 +39,37 @@ class MainActivity : AppCompatActivity() {
         }
 
         sceneView.onTapAr = { hitResult, _ ->
-            // Create an anchor from the tap
-            val anchor = hitResult.createAnchor()
+            if (isModelLoaded) {
+                // Create an anchor from the tap
+                val anchor = hitResult.createAnchor()
 
-            // Clone the pre-loaded model and add it to the scene
-            modelNode.clone().let {
-                it.anchor = anchor
-                sceneView.addChild(it)
+                // Clone the pre-loaded model and add it to the scene
+                modelNode.clone().let {
+                    it.anchor = anchor
+                    sceneView.addChild(it)
+                }
+
+                // Get the coordinates for the database
+                val pose = anchor.pose
+                val x = pose.tx()
+                val y = pose.ty()
+                val z = pose.tz()
+
+                val nodeId = "node_" + System.currentTimeMillis()
+                val nodeData = Node(
+                    id = nodeId,
+                    x = x,
+                    y = y,
+                    z = z,
+                    neighbors = mutableListOf()
+                )
+
+                chainAndUpdateNode(nodeData)
+
+                Toast.makeText(this@MainActivity, "Saved Point: $nodeId", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@MainActivity, "Model is loading, please wait...", Toast.LENGTH_SHORT).show()
             }
-
-            // Get the coordinates for the database
-            val pose = anchor.pose
-            val x = pose.tx()
-            val y = pose.ty()
-            val z = pose.tz()
-
-            val nodeId = "node_" + System.currentTimeMillis()
-            val nodeData = Node(
-                id = nodeId,
-                x = x,
-                y = y,
-                z = z,
-                neighbors = mutableListOf()
-            )
-
-            chainAndUpdateNode(nodeData)
-
-            Toast.makeText(this, "Saved Point: $nodeId", Toast.LENGTH_SHORT).show()
         }
     }
 
