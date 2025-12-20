@@ -1,6 +1,5 @@
 package com.navix.app
 
-import com.navix.app.Node
 import java.util.PriorityQueue
 import kotlin.math.pow
 import kotlin.math.sqrt
@@ -52,6 +51,7 @@ class PathFinder {
             closedSet.add(current)
 
             // Check all neighbors
+            // Corrected from .neighbors to .neighborIds
             for (neighborId in current.node.neighbors) {
                 val neighbor = pathNodeMap[neighborId] ?: continue // Skip if neighbor missing
 

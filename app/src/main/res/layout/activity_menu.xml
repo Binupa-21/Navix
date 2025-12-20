@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:background="#121212">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="NaviX"
+        android:textColor="#FFFFFF"
+        android:textSize="48sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="48dp"/>
+
+    <!-- ADMIN BUTTON -->
+    <Button
+        android:id="@+id/btnAdmin"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="Admin Mode (Map Building)"
+        android:backgroundTint="#6200EE"
+        android:layout_marginBottom="16dp"/>
+
+    <!-- USER BUTTON -->
+    <Button
+        android:id="@+id/btnUser"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="User Mode (Navigation)"
+        android:backgroundTint="#03DAC5"
+        android:textColor="#000000"/>
+
+</LinearLayout>
