@@ -1,6 +1,5 @@
 package com.navix.app
 
-// Ensure this imports YOUR data class, not the library's Node class
 import android.os.Bundle
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -25,168 +24,188 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // CHECK MODE
+        sceneView = findViewById(R.id.sceneView)
+
+        // 1. CHECK MODE (Admin vs User)
         val mode = intent.getStringExtra("mode")
         if (mode == "USER") {
             isUserMode = true
-            Toast.makeText(this, "User Mode: Navigation Only", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "User Mode", Toast.LENGTH_SHORT).show()
 
-            // If User Mode, run navigation immediately (or wait for a UI selection)
-            sceneView.postDelayed({ testNavigation() }, 3000)
+            // Show picker after 2 seconds
+            sceneView.postDelayed({
+                showDestinationPicker()
+            }, 2000)
         } else {
             Toast.makeText(this, "Admin Mode: Tap to Map", Toast.LENGTH_SHORT).show()
         }
 
-        sceneView = findViewById(R.id.sceneView)
-
-        // 1. SETUP THE MASTER MODEL
-        // We load this ONCE when the app starts.
+        // 2. SETUP THE MASTER MODEL (Marker)
         modelNode = ArModelNode(sceneView.engine).apply {
-            scale = Position(0.2f, 0.2f, 0.2f)
+            scale = Position(0.5f, 0.5f, 0.5f)
+
+            // FIX: Pointing to the "models" folder
             loadModelGlbAsync(
-                glbFileLocation = "models/marker.glb", // ADD "models/"
+                glbFileLocation = "models/marker.glb",
                 centerOrigin = Position(y = -0.5f),
                 onLoaded = {
                     isModelLoaded = true
-                    Toast.makeText(this@MainActivity, "Success: Marker Loaded!", Toast.LENGTH_SHORT).show()
+                    // Only show this toast in Admin mode to avoid clutter
+                    if (!isUserMode) {
+                        Toast.makeText(this@MainActivity, "Marker Loaded!", Toast.LENGTH_SHORT).show()
+                    }
                 },
-                onError = { exception ->
-                    // THIS WILL TELL YOU THE PROBLEM
-                    Toast.makeText(this@MainActivity, "Model Error: ${exception.message}", Toast.LENGTH_LONG).show()
-                    // Check Logcat for "NaviX" to see full details
-                    android.util.Log.e("NaviX", "Failed to load model", exception)
+                onError = { e ->
+                    Toast.makeText(this@MainActivity, "Error loading marker: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             )
         }
 
-        // 2. HANDLE TAPS
+        // 3. HANDLE TAPS
         sceneView.onTapAr = { hitResult, _ ->
+            // We only allow placing points if we are in ADMIN mode
             if (!isUserMode) {
                 if (isModelLoaded) {
-                    // A. Create the Anchor (The invisible real-world hook)
+                    // A. Create Anchor
                     val anchor = hitResult.createAnchor()
 
-                    // B. Visuals: Clone the master model and attach to anchor
+                    // B. Visuals
                     val visualNode = modelNode.clone()
                     visualNode.anchor = anchor
                     sceneView.addChild(visualNode)
 
-                    // C. Data: Get Coordinates
+                    // C. Data
+                    // C. Data
                     val pose = anchor.pose
                     val x = pose.tx()
                     val y = pose.ty()
                     val z = pose.tz()
 
-                    // D. Data: Create the Node Object
-                    val nodeId = "node_" + System.currentTimeMillis()
+                    // CALL THE DIALOG instead of saving immediately
+                    showNameDialog(x, y, z)
 
-                    val currentNeighbors = mutableListOf<String>()
-                    if (lastNodeId != null) {
-                        currentNeighbors.add(lastNodeId!!)
-                    }
+                    // D. Logic
 
-                    // FIX: Use "neighborIds" to match your data class property
-                    val newNode = Node(
-                        id = nodeId,
-                        x = x,
-                        y = y,
-                        z = z,
-                        neighbors = currentNeighbors
-                    )
-
-                    // E. Logic: Save to Cloud and Link
-                    chainAndUpdateNode(newNode)
-
-                    Toast.makeText(this@MainActivity, "Point Added", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(this@MainActivity, "Loading 3D Model... Wait a second.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Loading Model...", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
+    // Function to show a popup asking for a name
+    private fun showNameDialog(x: Float, y: Float, z: Float) {
+        val input = android.widget.EditText(this)
+        input.hint = "Name (e.g. Lab 1) or leave empty"
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Add Node")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+
+                // If text is empty, it's just a hallway (null name)
+                // If text is "stairs", mark type as STAIRS
+                val nodeName = if (name.isEmpty()) null else name
+                val nodeType = if (name.equals("stairs", ignoreCase = true)) "STAIRS" else "WALKING"
+
+                createAndSaveNode(x, y, z, nodeName, nodeType)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // Move the node creation logic here
+    private fun createAndSaveNode(x: Float, y: Float, z: Float, name: String?, type: String) {
+        val nodeId = "node_" + System.currentTimeMillis()
+        val currentNeighbors = mutableListOf<String>()
+        if (lastNodeId != null) {
+            currentNeighbors.add(lastNodeId!!)
+        }
+
+        val newNode = Node(
+            id = nodeId, x = x, y = y, z = z,
+            neighborIds = currentNeighbors,
+            name = name,
+            type = type
+        )
+
+        chainAndUpdateNode(newNode)
+        Toast.makeText(this, "Saved: ${name ?: "Path"}", Toast.LENGTH_SHORT).show()
+    }
+
     private fun chainAndUpdateNode(newNode: Node) {
-        // 1. Save the NEW Node (It already points backward to the previous node)
         db.collection("maps").document("floor_1")
             .collection("nodes").document(newNode.id)
             .set(newNode)
-            .addOnFailureListener { e ->
-                Toast.makeText(this, "Error saving: ${e.message}", Toast.LENGTH_LONG).show()
-            }
 
-        // 2. Update the PREVIOUS Node to point forward to this new node
         if (lastNodeId != null) {
             db.collection("maps").document("floor_1")
                 .collection("nodes").document(lastNodeId!!)
-                // FIX: Use "neighborIds" to match your data class property
                 .update("neighborIds", FieldValue.arrayUnion(newNode.id))
         }
-
-        // 3. Update the tracker so the next tap connects to this one
         lastNodeId = newNode.id
     }
-    fun testNavigation() {
-        Toast.makeText(this, "Downloading Map...", Toast.LENGTH_SHORT).show()
 
-        // 1. Download ALL nodes from Firebase
+    private fun showDestinationPicker() {
+        Toast.makeText(this, "Loading Destinations...", Toast.LENGTH_SHORT).show()
+
+        // 1. Get ALL nodes
         db.collection("maps").document("floor_1").collection("nodes")
             .get()
             .addOnSuccessListener { result ->
                 val allNodes = result.toObjects(Node::class.java)
 
-                if (allNodes.size < 2) {
-                    Toast.makeText(this, "Not enough nodes mapped yet!", Toast.LENGTH_SHORT).show()
+                // 2. Filter only nodes that have a Name
+                val destinations = allNodes.filter { it.name != null && it.name!!.isNotEmpty() }
+
+                if (destinations.isEmpty()) {
+                    Toast.makeText(this, "No named destinations found!", Toast.LENGTH_LONG).show()
                     return@addOnSuccessListener
                 }
 
-                // 2. PICK START AND END
-                // For testing: Start at the first node you ever mapped, End at the last one.
-                val startNode = allNodes[0]
-                val endNode = allNodes[allNodes.size - 1]
+                // 3. Show list in a Popup
+                val names = destinations.map { it.name!! }.toTypedArray()
 
-                // 3. RUN THE BRAIN
-                val pathFinder = PathFinder()
-                val path = pathFinder.findPath(allNodes, startNode.id, endNode.id)
+                androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("Where do you want to go?")
+                    .setItems(names) { _, which ->
+                        // User clicked an item
+                        val targetNode = destinations[which]
+                        val startNode = allNodes.first() // ASSUMPTION: User is at the entrance (First node mapped)
 
-                if (path.isNotEmpty()) {
-                    // 4. DRAW THE RESULT
-                    drawPathInAR(path)
-                } else {
-                    Toast.makeText(this, "No path found between these points.", Toast.LENGTH_LONG).show()
-                }
-            }
-            .addOnFailureListener {
-                Toast.makeText(this, "Download Failed", Toast.LENGTH_SHORT).show()
+                        startNavigation(startNode, targetNode, allNodes)
+                    }
+                    .show()
             }
     }
 
+    private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
+        val pf = PathFinder()
+        // You can hardcode false for now, or add a toggle switch in the UI later
+        val path = pf.findPath(allNodes, start.id, end.id, isWheelchair = false)
+        if (path.isNotEmpty()) {
+            drawPathInAR(path)
+        } else {
+            Toast.makeText(this, "No path found.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
-
-    fun drawPathInAR(path: List<com.navix.app.Node>) {
-        // 1. Loop through the calculated path
+    private fun drawPathInAR(path: List<com.navix.app.Node>) {
         for (node in path) {
-
-            // 2. Create a node for the dot
             val pathDot = ArModelNode(sceneView.engine).apply {
-                // FIX: Set scale manually like you did in onCreate
-                scale = Position(0.05f, 0.05f, 0.05f)
+                scale = Position(0.1f, 0.1f, 0.1f)
 
-                // FIX: Use the correct parameters for version 0.10.0
+                // FIX: Pointing to the "models" folder
                 loadModelGlbAsync(
-                    glbFileLocation = "models/sphere.glb", // ADD "models/"
+                    glbFileLocation = "models/sphere.glb",
                     centerOrigin = Position(y = 0.0f),
-                    onLoaded = {
-                        // Optional: You can do something here when it loads
-                    }
+                    onLoaded = {}
                 )
-
-                // 3. Set Position
                 position = Position(node.x, node.y, node.z)
             }
-
-            // 4. Add to Scene
             sceneView.addChild(pathDot)
         }
-        Toast.makeText(this, "Navigation Started! Follow the path.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "Follow the path!", Toast.LENGTH_LONG).show()
     }
 }

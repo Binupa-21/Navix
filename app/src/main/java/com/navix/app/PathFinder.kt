@@ -18,7 +18,7 @@ class PathFinder {
     }
 
     // THE MAIN ALGORITHM
-    fun findPath(allNodes: List<Node>, startId: String, targetId: String): List<Node> {
+    fun findPath(allNodes: List<Node>, startId: String, targetId: String, isWheelchair: Boolean = false): List<Node> {
 
         // 1. Find the Start and Target objects in your list
         val startNodeData = allNodes.find { it.id == startId } ?: return emptyList()
@@ -52,7 +52,7 @@ class PathFinder {
 
             // Check all neighbors
             // Corrected from .neighbors to .neighborIds
-            for (neighborId in current.node.neighbors) {
+            for (neighborId in current.node.neighborIds) {
                 val neighbor = pathNodeMap[neighborId] ?: continue // Skip if neighbor missing
 
                 if (closedSet.contains(neighbor)) continue // Skip if already checked

@@ -7,12 +7,16 @@
     tools:context=".MainActivity">
 
     <!-- The AR Camera View -->
+
+    <!-- Control Panel at the Bottom -->
+
     <io.github.sceneview.ar.ArSceneView
         android:id="@+id/sceneView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        tools:layout_editor_absoluteX="0dp"
+        tools:layout_editor_absoluteY="-41dp" />
 
-    <!-- Control Panel at the Bottom -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
