@@ -1,62 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     tools:context=".MainActivity">
 
-    <!-- The AR Camera View -->
-
-    <!-- Control Panel at the Bottom -->
-
-    <io.github.sceneview.ar.ArSceneView
+    <io.github.sceneview.ar.ARSceneView
         android:id="@+id/sceneView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        tools:layout_editor_absoluteX="0dp"
-        tools:layout_editor_absoluteY="-41dp" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="16dp"
-        android:background="#80000000"
-        app:layout_constraintBottom_toBottomOf="parent">
-
-        <!-- Button to Place a Point -->
-
-        <Button
-            android:id="@+id/btnPlaceNode"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:backgroundTint="#FF6200EE"
-            android:text="Place Node" />
-
-        <Space
-            android:layout_width="16dp"
-            android:layout_height="wrap_content"/>
-
-        <!-- Button to Save to Cloud -->
-        <Button
-            android:id="@+id/btnSave"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Save Map"
-            android:backgroundTint="#4CAF50"/>
-    </LinearLayout>
-
-    <!-- Node Type Selector (Top Left) -->
-    <Spinner
-        android:id="@+id/spinnerType"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:background="#FFFFFF"
-        android:padding="8dp"
-        android:layout_margin="16dp"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"/>
+        android:layout_height="match_parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -1,24 +1,35 @@
 package com.navix.app
 
 import android.os.Bundle
+import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.ar.core.Frame
+import com.google.ar.core.HitResult
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
-import io.github.sceneview.ar.ArSceneView
-import io.github.sceneview.ar.node.ArModelNode
+import com.google.firebase.firestore.ktx.firestore
+import com.google.firebase.ktx.Firebase
+import io.github.sceneview.ar.ARSceneView
+import io.github.sceneview.ar.node.AnchorNode
 import io.github.sceneview.math.Position
+import io.github.sceneview.node.ModelNode
+import kotlinx.coroutines.launch
+
 
 class MainActivity : AppCompatActivity() {
 
-    lateinit var sceneView: ArSceneView
-    lateinit var modelNode: ArModelNode // The Master Model
+    private var latestFrame: Frame? = null
 
-    val db = FirebaseFirestore.getInstance()
-
+    private lateinit var sceneView: ARSceneView
+    private lateinit var previewModelNode: ModelNode
+    private val db: FirebaseFirestore = Firebase.firestore
     private var lastNodeId: String? = null
     private var isModelLoaded = false
     private var isUserMode = false
+    private val placedAnchorNodes = mutableListOf<AnchorNode>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,186 +37,253 @@ class MainActivity : AppCompatActivity() {
 
         sceneView = findViewById(R.id.sceneView)
 
-        // 1. CHECK MODE (Admin vs User)
+        sceneView.onSessionUpdated = { _, frame ->
+            latestFrame = frame
+        }
+
+
+        // 1. MODE SETUP
         val mode = intent.getStringExtra("mode")
         if (mode == "USER") {
             isUserMode = true
             Toast.makeText(this, "User Mode", Toast.LENGTH_SHORT).show()
 
-            // Show picker after 2 seconds
-            sceneView.postDelayed({
-                showDestinationPicker()
-            }, 2000)
+            // Wait for AR session to be ready
+            sceneView.onSessionCreated = { session ->
+                runOnUiThread {
+                    showDestinationPicker()
+                }
+            }
         } else {
+            isUserMode = false
             Toast.makeText(this, "Admin Mode: Tap to Map", Toast.LENGTH_SHORT).show()
         }
 
-        // 2. SETUP THE MASTER MODEL (Marker)
-        modelNode = ArModelNode(sceneView.engine).apply {
-            scale = Position(0.5f, 0.5f, 0.5f)
+        // 2. LOAD MARKER MODEL
+        loadPreviewModel()
 
-            // FIX: Pointing to the "models" folder
-            loadModelGlbAsync(
-                glbFileLocation = "models/marker.glb",
-                centerOrigin = Position(y = -0.5f),
-                onLoaded = {
-                    isModelLoaded = true
-                    // Only show this toast in Admin mode to avoid clutter
-                    if (!isUserMode) {
-                        Toast.makeText(this@MainActivity, "Marker Loaded!", Toast.LENGTH_SHORT).show()
+        // 3. SET UP AR TAP LISTENER - CORRECT SCENEVIEW 2.0.3 WAY
+        // In SceneView 2.0.3, onTapAr only takes one parameter (hitResult)
+        sceneView.setOnGestureListener(
+            onSingleTapConfirmed = { motionEvent, _ ->
+                if (isUserMode || !isModelLoaded) return@setOnGestureListener
+
+                val frame = latestFrame ?: return@setOnGestureListener
+                val hitResults = frame.hitTest(motionEvent)
+
+                for (hit in hitResults) {
+                    val trackable = hit.trackable
+
+                    if (
+                        trackable is com.google.ar.core.Plane &&
+                        trackable.type == com.google.ar.core.Plane.Type.HORIZONTAL_UPWARD_FACING &&
+                        trackable.isPoseInPolygon(hit.hitPose)
+                    ) {
+                        placeMarkerAtHit(hit)
+                        return@setOnGestureListener
                     }
-                },
-                onError = { e ->
-                    Toast.makeText(this@MainActivity, "Error loading marker: ${e.message}", Toast.LENGTH_LONG).show()
                 }
-            )
-        }
+            }
+        )
 
-        // 3. HANDLE TAPS
-        sceneView.onTapAr = { hitResult, _ ->
-            // We only allow placing points if we are in ADMIN mode
-            if (!isUserMode) {
-                if (isModelLoaded) {
-                    // A. Create Anchor
-                    val anchor = hitResult.createAnchor()
 
-                    // B. Visuals
-                    val visualNode = modelNode.clone()
-                    visualNode.anchor = anchor
-                    sceneView.addChild(visualNode)
 
-                    // C. Data
-                    // C. Data
-                    val pose = anchor.pose
-                    val x = pose.tx()
-                    val y = pose.ty()
-                    val z = pose.tz()
 
-                    // CALL THE DIALOG instead of saving immediately
-                    showNameDialog(x, y, z)
 
-                    // D. Logic
 
-                } else {
-                    Toast.makeText(this@MainActivity, "Loading Model...", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun loadPreviewModel() {
+        lifecycleScope.launch {
+            val modelInstance = sceneView.modelLoader.loadModelInstance("models/marker.glb")
+
+            if (modelInstance != null) {
+                // centerOrigin and scaleToUnits go in the constructor
+                previewModelNode = ModelNode(
+                    modelInstance = modelInstance,
+                    scaleToUnits = 0.2f,
+                    centerOrigin = Position(y = -0.5f) // This aligns the bottom of the model to the floor
+                )
+
+                isModelLoaded = true
+                if (!isUserMode) {
+                    Toast.makeText(this@MainActivity, "Marker Loaded!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
-    // Function to show a popup asking for a name
-    private fun showNameDialog(x: Float, y: Float, z: Float) {
-        val input = android.widget.EditText(this)
-        input.hint = "Name (e.g. Lab 1) or leave empty"
 
-        androidx.appcompat.app.AlertDialog.Builder(this)
+    private fun placeMarkerAtHit(hitResult: HitResult) {
+        val anchor = hitResult.createAnchor()
+
+        // Correct: (Engine first, then the anchor)
+        // Do NOT use "engine = anchor"
+        val anchorNode = AnchorNode(sceneView.engine, anchor)
+
+        lifecycleScope.launch {
+            val modelInstance = sceneView.modelLoader.loadModelInstance("models/marker.glb")
+            if (modelInstance != null) {
+                val markerModelNode = ModelNode(
+                    modelInstance = modelInstance,
+                    scaleToUnits = 0.2f,
+                    centerOrigin = Position(y = -0.5f)
+                )
+
+                anchorNode.addChildNode(markerModelNode)
+                sceneView.addChildNode(anchorNode)
+                placedAnchorNodes.add(anchorNode)
+
+                // worldPosition is a property, no parentheses
+                val worldPos = anchorNode.worldPosition
+                showNameDialog(worldPos.x, worldPos.y, worldPos.z)
+            }
+        }
+    }
+
+    private fun showNameDialog(x: Float, y: Float, z: Float) {
+        val input = EditText(this)
+        input.hint = "Name (e.g. Lab 1)"
+
+        MaterialAlertDialogBuilder(this)
             .setTitle("Add Node")
             .setView(input)
             .setPositiveButton("Save") { _, _ ->
                 val name = input.text.toString().trim()
-
-                // If text is empty, it's just a hallway (null name)
-                // If text is "stairs", mark type as STAIRS
-                val nodeName = if (name.isEmpty()) null else name
-                val nodeType = if (name.equals("stairs", ignoreCase = true)) "STAIRS" else "WALKING"
-
-                createAndSaveNode(x, y, z, nodeName, nodeType)
+                val finalName = if (name.isEmpty()) null else name
+                val type = if (name.equals("stairs", true)) "STAIRS" else "WALKING"
+                createAndSaveNode(x, y, z, finalName, type)
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    // Move the node creation logic here
     private fun createAndSaveNode(x: Float, y: Float, z: Float, name: String?, type: String) {
         val nodeId = "node_" + System.currentTimeMillis()
-        val currentNeighbors = mutableListOf<String>()
-        if (lastNodeId != null) {
-            currentNeighbors.add(lastNodeId!!)
-        }
+        val neighbors = mutableListOf<String>()
+        if (lastNodeId != null) neighbors.add(lastNodeId!!)
 
-        val newNode = Node(
-            id = nodeId, x = x, y = y, z = z,
-            neighborIds = currentNeighbors,
-            name = name,
-            type = type
-        )
-
-        chainAndUpdateNode(newNode)
-        Toast.makeText(this, "Saved: ${name ?: "Path"}", Toast.LENGTH_SHORT).show()
+        val newNode = Node(nodeId, x, y, z, neighbors, name, type)
+        saveNode(newNode)
     }
 
-    private fun chainAndUpdateNode(newNode: Node) {
+    private fun saveNode(newNode: Node) {
         db.collection("maps").document("floor_1")
-            .collection("nodes").document(newNode.id)
-            .set(newNode)
-
-        if (lastNodeId != null) {
-            db.collection("maps").document("floor_1")
-                .collection("nodes").document(lastNodeId!!)
-                .update("neighborIds", FieldValue.arrayUnion(newNode.id))
-        }
-        lastNodeId = newNode.id
+            .collection("nodes").document(newNode.id).set(newNode)
+            .addOnSuccessListener {
+                if (lastNodeId != null) {
+                    db.collection("maps").document("floor_1")
+                        .collection("nodes").document(lastNodeId!!)
+                        .update("neighborIds", FieldValue.arrayUnion(newNode.id))
+                        .addOnSuccessListener {
+                            lastNodeId = newNode.id
+                            Toast.makeText(this, "Node saved and linked!", Toast.LENGTH_SHORT).show()
+                        }
+                } else {
+                    lastNodeId = newNode.id
+                    Toast.makeText(this, "First node saved!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .addOnFailureListener { e ->
+                Toast.makeText(this, "Error saving: ${e.message}", Toast.LENGTH_LONG).show()
+            }
     }
 
     private fun showDestinationPicker() {
-        Toast.makeText(this, "Loading Destinations...", Toast.LENGTH_SHORT).show()
-
-        // 1. Get ALL nodes
-        db.collection("maps").document("floor_1").collection("nodes")
-            .get()
+        db.collection("maps").document("floor_1")
+            .collection("nodes").get()
             .addOnSuccessListener { result ->
                 val allNodes = result.toObjects(Node::class.java)
-
-                // 2. Filter only nodes that have a Name
-                val destinations = allNodes.filter { it.name != null && it.name!!.isNotEmpty() }
+                val destinations = allNodes.filter { !it.name.isNullOrEmpty() }
 
                 if (destinations.isEmpty()) {
-                    Toast.makeText(this, "No named destinations found!", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "No destinations mapped yet", Toast.LENGTH_LONG).show()
                     return@addOnSuccessListener
                 }
 
-                // 3. Show list in a Popup
                 val names = destinations.map { it.name!! }.toTypedArray()
-
-                androidx.appcompat.app.AlertDialog.Builder(this)
-                    .setTitle("Where do you want to go?")
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Select Destination")
                     .setItems(names) { _, which ->
-                        // User clicked an item
-                        val targetNode = destinations[which]
-                        val startNode = allNodes.first() // ASSUMPTION: User is at the entrance (First node mapped)
-
-                        startNavigation(startNode, targetNode, allNodes)
+                        val startNode = findClosestNode(allNodes)
+                        startNavigation(startNode, destinations[which], allNodes)
                     }
+                    .setNegativeButton("Cancel", null)
                     .show()
             }
+            .addOnFailureListener { e ->
+                Toast.makeText(this, "Failed to load nodes: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+    }
+
+    private fun findClosestNode(allNodes: List<Node>): Node {
+        return allNodes.firstOrNull { it.name != null } ?: allNodes.first()
     }
 
     private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
         val pf = PathFinder()
-        // You can hardcode false for now, or add a toggle switch in the UI later
-        val path = pf.findPath(allNodes, start.id, end.id, isWheelchair = false)
+        val path = pf.findPath(allNodes, start.id, end.id, false)
+
         if (path.isNotEmpty()) {
             drawPathInAR(path)
         } else {
-            Toast.makeText(this, "No path found.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No path found", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun drawPathInAR(path: List<com.navix.app.Node>) {
-        for (node in path) {
-            val pathDot = ArModelNode(sceneView.engine).apply {
-                scale = Position(0.1f, 0.1f, 0.1f)
+    private fun drawPathInAR(path: List<Node>) {
+        clearPath()
 
-                // FIX: Pointing to the "models" folder
-                loadModelGlbAsync(
-                    glbFileLocation = "models/sphere.glb",
-                    centerOrigin = Position(y = 0.0f),
-                    onLoaded = {}
-                )
-                position = Position(node.x, node.y, node.z)
+        // 1. Launch a coroutine to load the model asynchronously
+        lifecycleScope.launch {
+            // 2. Load the model once to reuse it for all path nodes
+            val modelInstance = sceneView.modelLoader.loadModelInstance("models/sphere.glb")
+
+            if (modelInstance != null) {
+                path.forEach { node ->
+                    // 3. Create a new ModelNode using the loaded instance
+                    val sphereModelNode = ModelNode(
+                        modelInstance = modelInstance,
+                        scaleToUnits = 0.05f // 5cm spheres
+                    ).apply {
+                        // 4. Set the position
+                        position = Position(node.x, node.y, node.z)
+                    }
+                    sceneView.addChildNode(sphereModelNode)
+                }
+                Toast.makeText(this@MainActivity, "Path displayed!", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@MainActivity, "Failed to load sphere model", Toast.LENGTH_SHORT).show()
             }
-            sceneView.addChild(pathDot)
         }
-        Toast.makeText(this, "Follow the path!", Toast.LENGTH_LONG).show()
+    }
+
+    private fun clearPath() {
+        sceneView.childNodes.forEach { node ->
+            if (node is ModelNode && !placedAnchorNodes.any { it == node.parent }) {
+                sceneView.removeChildNode(node)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // SceneView 2.0.3 uses onSessionResumed
+        sceneView.onSessionResumed = { session ->
+            // Session resumed, you can add custom logic here if needed
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // SceneView 2.0.3 uses onSessionPaused
+        sceneView.onSessionPaused = { session ->
+            // Session paused, you can add custom logic here if needed
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        sceneView.destroy()
     }
 }
