@@ -48,21 +48,27 @@ class MainActivity : AppCompatActivity() {
             isUserMode = true
             Toast.makeText(this, "User Mode", Toast.LENGTH_SHORT).show()
 
-            // Wait for AR session to be ready
-            sceneView.onSessionCreated = { session ->
+            sceneView.onSessionCreated = { _ ->
                 runOnUiThread {
                     showDestinationPicker()
                 }
             }
         } else {
             isUserMode = false
-            Toast.makeText(this, "Admin Mode: Tap to Map", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Admin Mode", Toast.LENGTH_SHORT).show()
+
+            // --- ADD THIS LINE ---
+            // Load the old dots so we can see them
+            sceneView.onSessionCreated = { _ ->
+                loadExistingMap()
+            }
+            // ---------------------
         }
 
         // 2. LOAD MARKER MODEL
         loadPreviewModel()
 
-        // 3. SET UP AR TAP LISTENER - CORRECT SCENEVIEW 2.0.3 WAY
+        // 3. SET UP AR TAP LISTENER - CORRECT SCENE VIEW 2.0.3 WAY
         // In SceneView 2.0.3, onTapAr only takes one parameter (hitResult)
         sceneView.setOnGestureListener(
             onSingleTapConfirmed = { motionEvent, _ ->
@@ -150,7 +156,7 @@ class MainActivity : AppCompatActivity() {
             .setView(input)
             .setPositiveButton("Save") { _, _ ->
                 val name = input.text.toString().trim()
-                val finalName = if (name.isEmpty()) null else name
+                val finalName = name.ifEmpty { null }
                 val type = if (name.equals("stairs", true)) "STAIRS" else "WALKING"
                 createAndSaveNode(x, y, z, finalName, type)
             }
@@ -269,15 +275,15 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         // SceneView 2.0.3 uses onSessionResumed
-        sceneView.onSessionResumed = { session ->
+        sceneView.onSessionResumed = { _ ->
             // Session resumed, you can add custom logic here if needed
         }
     }
 
     override fun onPause() {
         super.onPause()
-        // SceneView 2.0.3 uses onSessionPaused
-        sceneView.onSessionPaused = { session ->
+        /* SceneView 2.0.3 uses onSessionPaused */
+        sceneView.onSessionPaused = { _ ->
             // Session paused, you can add custom logic here if needed
         }
     }
@@ -285,5 +291,49 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         sceneView.destroy()
+    }
+    private fun loadExistingMap() {
+        Toast.makeText(this, "Loading existing map...", Toast.LENGTH_SHORT).show()
+
+        db.collection("maps").document("floor_1")
+            .collection("nodes").get()
+            .addOnSuccessListener { result ->
+                val nodes = result.toObjects(Node::class.java)
+
+                if (nodes.isEmpty()) return@addOnSuccessListener
+
+                // Use coroutine to load the model once, then place copies
+                lifecycleScope.launch {
+                    val modelInstance = sceneView.modelLoader.loadModelInstance("models/marker.glb")
+
+                    if (modelInstance != null) {
+                        for (node in nodes) {
+                            // Create a visual node for this data point
+                            val markerNode = ModelNode(
+                                modelInstance = modelInstance,
+                                scaleToUnits = 0.2f,
+                                centerOrigin = Position(y = -0.5f)
+                            ).apply {
+                                position = Position(node.x, node.y, node.z)
+                            }
+
+                            // Optional: Add click listener to delete existing nodes too
+                            markerNode.onSingleTapConfirmed = {
+                                if (!isUserMode) {
+                                    // For now, just show name. You can add showDeleteDialog here if you want.
+                                    Toast.makeText(this@MainActivity, "Node: ${node.name ?: "Unnamed"}", Toast.LENGTH_SHORT).show()
+                                }
+                                true
+                            }
+
+                            sceneView.addChildNode(markerNode)
+                        }
+                        Toast.makeText(this@MainActivity, "${nodes.size} nodes loaded.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .addOnFailureListener {
+                Toast.makeText(this, "Failed to load map.", Toast.LENGTH_SHORT).show()
+            }
     }
 }

@@ -9,10 +9,10 @@ data class Node(
     val z: Float = 0f,
     val neighborIds: List<String> = emptyList(),
     val name: String? = null,
-    val type: String = "WALKING", // WALKING or STAIRS
+    val type: String = "WALKING", /* WALKING or STAIRS */
 
     @get:Exclude
-    var neighbors: List<Node> = emptyList()
+    private var neighbors: List<Node> = emptyList()
 ) {
     // For Firestore serialization (Firestore requires empty constructor)
     constructor() : this("", 0f, 0f, 0f, emptyList(), null, "WALKING")
