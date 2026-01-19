@@ -213,103 +213,109 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showDestinationPicker() {
+        Toast.makeText(this, "Loading Map...", Toast.LENGTH_SHORT).show()
+
         db.collection("maps").document("floor_1")
             .collection("nodes").get()
             .addOnSuccessListener { result ->
                 val allNodes = result.toObjects(Node::class.java)
-                val destinations = allNodes.filter { !it.name.isNullOrEmpty() }
 
-                if (destinations.isEmpty()) {
-                    Toast.makeText(this, "No destinations mapped yet", Toast.LENGTH_LONG).show()
+                // Filter only named nodes (Locations)
+                val namedNodes = allNodes.filter { !it.name.isNullOrEmpty() }
+
+                if (namedNodes.size < 2) {
+                    Toast.makeText(this, "Need at least 2 named locations to navigate!", Toast.LENGTH_LONG).show()
                     return@addOnSuccessListener
                 }
 
-                val names = destinations.map { it.name!! }.toTypedArray()
-                MaterialAlertDialogBuilder(this)
-                    .setTitle("Select Destination")
-                    .setItems(names) { _, which ->
-                        val startNode = findClosestNode(allNodes)
-                        startNavigation(startNode, destinations[which], allNodes)
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+                // STEP 1: Ask for START Location
+                showStartSelectionDialog(namedNodes, allNodes)
             }
             .addOnFailureListener { e ->
-                Toast.makeText(this, "Failed to load nodes: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Error loading map: ${e.message}", Toast.LENGTH_LONG).show()
             }
     }
+
+    private fun showStartSelectionDialog(namedNodes: List<Node>, allNodes: List<Node>) {
+        val names = namedNodes.map { it.name!! }.toTypedArray()
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Step 1: Where are you now?")
+            .setItems(names) { _, which ->
+                val startNode = namedNodes[which]
+                // STEP 2: Ask for DESTINATION
+                showEndSelectionDialog(startNode, namedNodes, allNodes)
+            }
+            .setCancelable(false) // User must pick a start point
+            .show()
+    }
+
+    private fun showEndSelectionDialog(startNode: Node, namedNodes: List<Node>, allNodes: List<Node>) {
+        // Filter out the start node (can't go to where you already are)
+        val possibleDestinations = namedNodes.filter { it.id != startNode.id }
+        val names = possibleDestinations.map { it.name!! }.toTypedArray()
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Step 2: Where do you want to go?")
+            .setItems(names) { _, which ->
+                val endNode = possibleDestinations[which]
+                startNavigation(startNode, endNode, allNodes)
+            }
+            .setNegativeButton("Back") { _, _ ->
+                showStartSelectionDialog(namedNodes, allNodes)
+            }
+            .show()
+    }
+
+    private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
+        val pf = PathFinder()
+        val path = pf.findPath(allNodes, start.id, end.id, false)
+
+        if (path.isNotEmpty()) {
+            // PASS THE START NODE so we can calculate the offset
+            drawPathInAR(path, start)
+        } else {
+            Toast.makeText(this, "No path found between these points.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
 
     private fun findClosestNode(allNodes: List<Node>): Node {
         return allNodes.firstOrNull { it.name != null } ?: allNodes.first()
     }
 
-    private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
-
-        // 1. Check if Start and End are on the same floor
-        // (Note: You need to make sure your Node object has the floorId property filled)
-        if (start.floorId != end.floorId) {
-
-            // DIFFERENT FLOORS: Find the Elevator on the current floor
-            val elevator = allNodes.find { it.type == "ELEVATOR" || it.name?.contains("Lift", true) == true }
-
-            if (elevator != null) {
-                Toast.makeText(this, "Route to Elevator calculated. Switch floors there.", Toast.LENGTH_LONG).show()
-                // Calculate path only to the elevator first
-                val pf = PathFinder()
-                val path = pf.findPath(allNodes, start.id, elevator.id, false)
-                drawPathInAR(path)
-
-                // You would need a listener here to detect when they reach the elevator
-                // to trigger the "Load Floor 2" logic.
-            } else {
-                Toast.makeText(this, "No elevator found on this floor!", Toast.LENGTH_LONG).show()
-            }
-
-        } else {
-            // SAME FLOOR: Normal Navigation
-            val pf = PathFinder()
-            val path = pf.findPath(allNodes, start.id, end.id, false)
-            if (path.isNotEmpty()) {
-                drawPathInAR(path)
-            } else {
-                Toast.makeText(this, "No path found.", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun drawPathInAR(path: List<Node>) {
+    private fun drawPathInAR(path: List<Node>, startNode: Node) {
         clearPath()
 
-        // 1. Launch a coroutine to load the model asynchronously
         lifecycleScope.launch {
-            // 2. Load the model once to reuse it for all path nodes
             val modelInstance = sceneView.modelLoader.loadModelInstance("models/sphere.glb")
 
             if (modelInstance != null) {
                 path.forEach { node ->
-                    // 3. Create a new ModelNode using the loaded instance
                     val sphereModelNode = ModelNode(
                         modelInstance = modelInstance,
-                        scaleToUnits = 0.05f // 5cm spheres
+                        scaleToUnits = 0.05f
                     ).apply {
-                        // 4. Set the position
-                        position = Position(node.x, node.y, node.z)
+                        // --- THE MATHEMATICAL FIX ---
+                        // Shift the world so the Start Node is at (0,0,0) (Your feet)
+                        val offsetX = node.x - startNode.x
+                        val offsetY = node.y - startNode.y
+                        val offsetZ = node.z - startNode.z
+
+                        position = Position(offsetX, offsetY, offsetZ)
                     }
                     sceneView.addChildNode(sphereModelNode)
+                    placedAnchorNodes.add(sphereModelNode as? AnchorNode ?: return@forEach)
                 }
-                Toast.makeText(this@MainActivity, "Path displayed!", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this@MainActivity, "Failed to load sphere model", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Path loaded relative to ${startNode.name}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
     private fun clearPath() {
-        sceneView.childNodes.forEach { node ->
-            if (node is ModelNode && !placedAnchorNodes.any { it == node.parent }) {
-                sceneView.removeChildNode(node)
-            }
-        }
+        // Remove all children that are NOT the main preview marker
+        val nodesToRemove = sceneView.childNodes.filter { it != previewModelNode }
+        nodesToRemove.forEach { sceneView.removeChildNode(it) }
     }
 
     override fun onResume() {
