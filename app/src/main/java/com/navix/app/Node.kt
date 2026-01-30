@@ -10,6 +10,8 @@ data class Node(
     val type: String = "WALKING",
     // NEW FIELD
     val floorId: String = "floor_1"
+
+    val cloudAnchorId: String? = null
 ) {
     // For Firestore serialization (Firestore requires empty constructor)
     constructor() : this("", 0f, 0f, 0f, emptyList(), null, "WALKING")

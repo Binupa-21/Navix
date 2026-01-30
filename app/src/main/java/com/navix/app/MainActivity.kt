@@ -1,7 +1,6 @@
 package com.navix.app
 
 import android.os.Bundle
-import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -30,6 +29,9 @@ class MainActivity : AppCompatActivity() {
     private var isUserMode = false
     private val placedAnchorNodes = mutableListOf<AnchorNode>()
 
+    private var pendingAnchor: com.google.ar.core.Anchor? = null
+    private var isHosting = false
+
     // Inside MainActivity class
     private var currentFloorId = "floor_1" // Default
 
@@ -57,23 +59,45 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         sceneView = findViewById(R.id.sceneView)
 
-        sceneView.onSessionUpdated = { _, frame ->
+        // 1. SETUP SESSION UPDATE LOOP (For Hosting Checks)
+        sceneView.onSessionUpdated = { session, frame ->
             latestFrame = frame
+
+            if (isHosting && pendingAnchor != null) {
+                val state = pendingAnchor!!.cloudAnchorState
+
+                if (state == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
+                    val cloudId = pendingAnchor!!.cloudAnchorId
+                    isHosting = false
+                    Toast.makeText(this, "Hosting Success! ID: $cloudId", Toast.LENGTH_SHORT).show()
+
+                    // Get the final position and open the Save Dialog
+                    val pose = pendingAnchor!!.pose
+                    runOnUiThread {
+                        showNameDialog(pose.tx(), pose.ty(), pose.tz(), cloudId)
+                    }
+                    pendingAnchor = null
+                }
+                else if (state == com.google.ar.core.Anchor.CloudAnchorState.ERROR_INTERNAL ||
+                    state == com.google.ar.core.Anchor.CloudAnchorState.ERROR_NOT_AUTHORIZED) {
+                    isHosting = false
+                    Toast.makeText(this, "Error Hosting: $state", Toast.LENGTH_LONG).show()
+                    pendingAnchor = null
+                }
+            }
         }
 
-
-        // 1. MODE SETUP
+        // 2. MODE SETUP
         val mode = intent.getStringExtra("mode")
         if (mode == "USER") {
             isUserMode = true
             Toast.makeText(this, "User Mode", Toast.LENGTH_SHORT).show()
-
+            // Ensure session is created before showing picker
             sceneView.onSessionCreated = { _ ->
                 runOnUiThread {
                     showDestinationPicker()
@@ -82,30 +106,33 @@ class MainActivity : AppCompatActivity() {
         } else {
             isUserMode = false
             Toast.makeText(this, "Admin Mode", Toast.LENGTH_SHORT).show()
-
-            // --- ADD THIS LINE ---
-            // Load the old dots so we can see them
+            // Setup Spinner
+            setupFloorSpinner()
+            // Load existing map
             sceneView.onSessionCreated = { _ ->
                 loadExistingMap()
             }
-            // ---------------------
         }
 
-        // 2. LOAD MARKER MODEL
+        // 3. LOAD MARKER MODEL
         loadPreviewModel()
 
-        // 3. SET UP AR TAP LISTENER - CORRECT SCENE VIEW 2.0.3 WAY
-        // In SceneView 2.0.3, onTapAr only takes one parameter (hitResult)
+        // 4. SET UP AR TAP LISTENER
         sceneView.setOnGestureListener(
             onSingleTapConfirmed = { motionEvent, _ ->
                 if (isUserMode || !isModelLoaded) return@setOnGestureListener
+
+                // Prevent double taps while hosting
+                if (isHosting) {
+                    Toast.makeText(this, "Wait, still hosting...", Toast.LENGTH_SHORT).show()
+                    return@setOnGestureListener
+                }
 
                 val frame = latestFrame ?: return@setOnGestureListener
                 val hitResults = frame.hitTest(motionEvent)
 
                 for (hit in hitResults) {
                     val trackable = hit.trackable
-
                     if (
                         trackable is com.google.ar.core.Plane &&
                         trackable.type == com.google.ar.core.Plane.Type.HORIZONTAL_UPWARD_FACING &&
@@ -117,12 +144,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
-
-
-
-
-
-
     }
 
     private fun loadPreviewModel() {
@@ -147,11 +168,8 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun placeMarkerAtHit(hitResult: HitResult) {
-        val anchor = hitResult.createAnchor()
-
-        // Correct: (Engine first, then the anchor)
-        // Do NOT use "engine = anchor"
-        val anchorNode = AnchorNode(sceneView.engine, anchor)
+        val localAnchor = hitResult.createAnchor()
+        val anchorNode = AnchorNode(sceneView.engine, localAnchor)
 
         lifecycleScope.launch {
             val modelInstance = sceneView.modelLoader.loadModelInstance("models/marker.glb")
@@ -161,41 +179,58 @@ class MainActivity : AppCompatActivity() {
                     scaleToUnits = 0.2f,
                     centerOrigin = Position(y = -0.5f)
                 )
-
                 anchorNode.addChildNode(markerModelNode)
                 sceneView.addChildNode(anchorNode)
                 placedAnchorNodes.add(anchorNode)
-
-                // worldPosition is a property, no parentheses
-                val worldPos = anchorNode.worldPosition
-                showNameDialog(worldPos.x, worldPos.y, worldPos.z)
             }
+        }
+
+        // --- CLOUD ANCHOR HOSTING ---
+        Toast.makeText(this, "Hosting... Move phone to scan object.", Toast.LENGTH_LONG).show()
+        try {
+            // FIX: Use 'session' instead of 'arSession'
+            pendingAnchor = sceneView.session?.hostCloudAnchor(localAnchor)
+            isHosting = true
+        } catch (e: Exception) {
+            Toast.makeText(this, "Error starting host: ${e.message}", Toast.LENGTH_LONG).show()
+            isHosting = false
         }
     }
 
-    private fun showNameDialog(x: Float, y: Float, z: Float) {
-        val input = EditText(this)
+    private fun showNameDialog(x: Float, y: Float, z: Float, cloudId: String) {
+        val input = android.widget.EditText(this)
         input.hint = "Name (e.g. Lab 1)"
 
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Add Node")
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Save Cloud Anchor?")
             .setView(input)
             .setPositiveButton("Save") { _, _ ->
                 val name = input.text.toString().trim()
-                val finalName = name.ifEmpty { null }
+                val finalName = if (name.isEmpty()) null else name
                 val type = if (name.equals("stairs", true)) "STAIRS" else "WALKING"
-                createAndSaveNode(x, y, z, finalName, type)
+
+                // Pass cloudId
+                createAndSaveNode(x, y, z, finalName, type, cloudId)
+
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton("Cancel", null) // Note: Visual node stays, simple limitation
             .show()
     }
 
-    private fun createAndSaveNode(x: Float, y: Float, z: Float, name: String?, type: String) {
+    private fun createAndSaveNode(x: Float, y: Float, z: Float, name: String?, type: String, cloudId: String) {
         val nodeId = "node_" + System.currentTimeMillis()
         val neighbors = mutableListOf<String>()
         if (lastNodeId != null) neighbors.add(lastNodeId!!)
 
-        val newNode = Node(nodeId, x, y, z, neighbors, name, type)
+        val newNode = Node(
+            id = nodeId,
+            x = x, y = y, z = z, // We still save these for backup
+            neighborIds = neighbors,
+            name = name,
+            type = type,
+            floorId = currentFloorId,
+            cloudAnchorId = cloudId // SAVE THE ID!
+        )
         saveNode(newNode)
     }
 
