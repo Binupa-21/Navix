@@ -9,7 +9,7 @@ data class Node(
     val name: String? = null,
     val type: String = "WALKING",
     // NEW FIELD
-    val floorId: String = "floor_1"
+    val floorId: String = "floor_1",
 
     val cloudAnchorId: String? = null
 ) {

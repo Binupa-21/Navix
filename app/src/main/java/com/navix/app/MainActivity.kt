@@ -35,6 +35,16 @@ class MainActivity : AppCompatActivity() {
     // Inside MainActivity class
     private var currentFloorId = "floor_1" // Default
 
+    private lateinit var progressBar: android.widget.ProgressBar
+    private lateinit var statusText: android.widget.TextView
+
+    private var resolvingAnchor: com.google.ar.core.Anchor? = null
+    private var isResolving = false
+
+    private val placedPathNodes = mutableListOf<io.github.sceneview.node.ModelNode>()
+
+    private var navigationStartNode: Node? = null
+
     // Inside onCreate
     private fun setupFloorSpinner() {
         val floorSpinner = findViewById<android.widget.Spinner>(R.id.floorSpinner)
@@ -65,29 +75,48 @@ class MainActivity : AppCompatActivity() {
         sceneView = findViewById(R.id.sceneView)
 
         // 1. SETUP SESSION UPDATE LOOP (For Hosting Checks)
+        progressBar = findViewById(R.id.loadingProgressBar)
+        statusText = findViewById(R.id.statusText)
+
         sceneView.onSessionUpdated = { session, frame ->
             latestFrame = frame
 
+            // --- CHECK HOSTING (Admin Mode) ---
             if (isHosting && pendingAnchor != null) {
                 val state = pendingAnchor!!.cloudAnchorState
-
                 if (state == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
-                    val cloudId = pendingAnchor!!.cloudAnchorId
                     isHosting = false
-                    Toast.makeText(this, "Hosting Success! ID: $cloudId", Toast.LENGTH_SHORT).show()
-
-                    // Get the final position and open the Save Dialog
+                    hideLoading()
+                    val cloudId = pendingAnchor!!.cloudAnchorId
                     val pose = pendingAnchor!!.pose
+
+                    // FIX: Must use runOnUiThread to show the Dialog from the AR thread
                     runOnUiThread {
                         showNameDialog(pose.tx(), pose.ty(), pose.tz(), cloudId)
                     }
                     pendingAnchor = null
-                }
-                else if (state == com.google.ar.core.Anchor.CloudAnchorState.ERROR_INTERNAL ||
-                    state == com.google.ar.core.Anchor.CloudAnchorState.ERROR_NOT_AUTHORIZED) {
+                } else if (state.isError) {
                     isHosting = false
-                    Toast.makeText(this, "Error Hosting: $state", Toast.LENGTH_LONG).show()
+                    hideLoading()
+                    runOnUiThread { Toast.makeText(this, "Hosting Error: $state", Toast.LENGTH_LONG).show() }
                     pendingAnchor = null
+                }
+            }
+
+            // --- CHECK RESOLVING (User Mode) ---
+            if (isResolving && resolvingAnchor != null) {
+                val state = resolvingAnchor!!.cloudAnchorState
+                if (state == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
+                    isResolving = false
+                    hideLoading()
+                    runOnUiThread {
+                        Toast.makeText(this, "Location Synced!", Toast.LENGTH_SHORT).show()
+                        proceedToDrawPath() // Trigger the path drawing
+                    }
+                } else if (state.isError) {
+                    isResolving = false
+                    hideLoading()
+                    runOnUiThread { Toast.makeText(this, "Sync Failed: $state", Toast.LENGTH_LONG).show() }
                 }
             }
         }
@@ -168,9 +197,13 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun placeMarkerAtHit(hitResult: HitResult) {
+        // 1. Create a standard local anchor from the tap
         val localAnchor = hitResult.createAnchor()
+
+        // 2. Create an AnchorNode (The 3D "hook" in the real world)
         val anchorNode = AnchorNode(sceneView.engine, localAnchor)
 
+        // 3. Load and show the visual marker immediately
         lifecycleScope.launch {
             val modelInstance = sceneView.modelLoader.loadModelInstance("models/marker.glb")
             if (modelInstance != null) {
@@ -179,22 +212,37 @@ class MainActivity : AppCompatActivity() {
                     scaleToUnits = 0.2f,
                     centerOrigin = Position(y = -0.5f)
                 )
+
+                // Attach visual to the anchor and add to the scene
                 anchorNode.addChildNode(markerModelNode)
                 sceneView.addChildNode(anchorNode)
+
+                // Track this node so we can remove it if needed
                 placedAnchorNodes.add(anchorNode)
             }
         }
 
-        // --- CLOUD ANCHOR HOSTING ---
-        Toast.makeText(this, "Hosting... Move phone to scan object.", Toast.LENGTH_LONG).show()
+        // 4. TRIGGER CLOUD HOSTING
+        // We show the loading screen because this takes 5-10 seconds
+        showLoading("Hosting point... Move your phone slowly around the marker.")
+
         try {
-            // FIX: Use 'session' instead of 'arSession'
-            pendingAnchor = sceneView.session?.hostCloudAnchor(localAnchor)
-            isHosting = true
+            val session = sceneView.session
+            if (session != null) {
+                // This starts the upload to Google Cloud
+                pendingAnchor = session.hostCloudAnchor(localAnchor)
+                isHosting = true
+            } else {
+                hideLoading()
+                Toast.makeText(this, "AR Session not ready", Toast.LENGTH_SHORT).show()
+            }
         } catch (e: Exception) {
+            hideLoading()
             Toast.makeText(this, "Error starting host: ${e.message}", Toast.LENGTH_LONG).show()
-            isHosting = false
         }
+
+        // NOTE: We DO NOT call showNameDialog here.
+        // We must wait for the SUCCESS state in the onSessionUpdated loop.
     }
 
     private fun showNameDialog(x: Float, y: Float, z: Float, cloudId: String) {
@@ -302,15 +350,34 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
-        val pf = PathFinder()
-        val path = pf.findPath(allNodes, start.id, end.id, false)
+    // Temporary variables to store info while waiting for Resolve
+    private var finalPath: List<Node>? = null
 
-        if (path.isNotEmpty()) {
-            // PASS THE START NODE so we can calculate the offset
-            drawPathInAR(path, start)
-        } else {
-            Toast.makeText(this, "No path found between these points.", Toast.LENGTH_SHORT).show()
+    private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
+        if (start.cloudAnchorId == null) {
+            Toast.makeText(this, "No Cloud ID for start point!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val pf = PathFinder()
+        // Assuming findPath takes (nodes, startId, endId, isWheelchair)
+        finalPath = pf.findPath(allNodes, start.id, end.id, false)
+
+        if (finalPath != null && finalPath!!.isNotEmpty()) {
+            navigationStartNode = start // Store this for the math offset later
+
+            showLoading("Syncing location... Look at ${start.name}")
+
+            // This tells ARCore to look for the physical spot saved by Admin
+            resolvingAnchor = sceneView.session?.resolveCloudAnchor(start.cloudAnchorId)
+            isResolving = true
+        }
+    }
+
+    private fun proceedToDrawPath() {
+        // FIX: Pass both required parameters (Path and StartNode)
+        if (finalPath != null && navigationStartNode != null) {
+            drawPathInAR(finalPath!!, navigationStartNode!!)
         }
     }
 
@@ -327,26 +394,24 @@ class MainActivity : AppCompatActivity() {
 
             if (modelInstance != null) {
                 path.forEach { node ->
-                    val sphereModelNode = ModelNode(
+                    val sphereModelNode = io.github.sceneview.node.ModelNode(
                         modelInstance = modelInstance,
                         scaleToUnits = 0.05f
                     ).apply {
-                        // --- THE MATHEMATICAL FIX ---
-                        // Shift the world so the Start Node is at (0,0,0) (Your feet)
+                        // --- THE WORLD-SHIFT MATH ---
+                        // Subtract startNode coordinates to make the path relative to your current anchor
                         val offsetX = node.x - startNode.x
                         val offsetY = node.y - startNode.y
                         val offsetZ = node.z - startNode.z
 
-                        position = Position(offsetX, offsetY, offsetZ)
+                        position = io.github.sceneview.math.Position(offsetX, offsetY, offsetZ)
                     }
                     sceneView.addChildNode(sphereModelNode)
-                    placedAnchorNodes.add(sphereModelNode as? AnchorNode ?: return@forEach)
+                    placedPathNodes.add(sphereModelNode) // Fixed list type
                 }
-                Toast.makeText(this@MainActivity, "Path loaded relative to ${startNode.name}", Toast.LENGTH_LONG).show()
             }
         }
     }
-
     private fun clearPath() {
         // Remove all children that are NOT the main preview marker
         val nodesToRemove = sceneView.childNodes.filter { it != previewModelNode }
@@ -440,5 +505,19 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+    private fun showLoading(message: String) {
+        runOnUiThread {
+            progressBar.visibility = android.view.View.VISIBLE
+            statusText.visibility = android.view.View.VISIBLE
+            statusText.text = message
+        }
+    }
+
+    private fun hideLoading() {
+        runOnUiThread {
+            progressBar.visibility = android.view.View.GONE
+            statusText.visibility = android.view.View.GONE
+        }
     }
 }
