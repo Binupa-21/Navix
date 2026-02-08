@@ -212,7 +212,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        showLoading("Uploading to Google Cloud... Walk in a slow circle.")
+        showLoading("Uploading spatial map to Google Cloud Brain...")
         try {
             pendingAnchor = sceneView.session?.hostCloudAnchor(localAnchor)
             isHosting = (pendingAnchor != null)
@@ -339,54 +339,63 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun drawPathInAR(path: List<Node>, startNode: Node) {
-        clearPath() // Wipe previous path
+        clearPath()
 
         lifecycleScope.launch {
-            // 1. Pre-load all three models once to keep the app fast
             val sphereModel = sceneView.modelLoader.loadModelInstance("models/sphere.glb")
-            val markerModel = sceneView.modelLoader.loadModelInstance("models/marker.glb")
-            val arrowModel = sceneView.modelLoader.loadModelInstance("models/arrow.glb") // Optional
+            val destinationModel = sceneView.modelLoader.loadModelInstance("models/marker.glb")
 
-            if (sphereModel != null && markerModel != null) {
-                path.forEachIndexed { index, node ->
+            if (sphereModel != null && destinationModel != null) {
 
-                    // 2. Decide which model to use
-                    val isDestination = (index == path.size - 1)
-                    val isEveryFifth = (index % 5 == 0 && index != 0)
+                // Loop through the path to look at segments (from current node to next node)
+                for (i in 0 until path.size - 1) {
+                    val nodeA = path[i]
+                    val nodeB = path[i + 1]
 
-                    // Pick the model instance
-                    val selectedInstance = when {
-                        isDestination -> markerModel
-                        isEveryFifth && arrowModel != null -> arrowModel
-                        else -> sphereModel
-                    }
+                    // 1. Calculate distance between these two saved nodes
+                    val dx = nodeB.x - nodeA.x
+                    val dy = nodeB.y - nodeA.y
+                    val dz = nodeB.z - nodeA.z
+                    val distance = Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
 
-                    // 3. Create the node
-                    val pathNode = ModelNode(
-                        modelInstance = selectedInstance,
-                        // Make destination much larger (25cm) than breadcrumbs (5cm)
-                        scaleToUnits = if (isDestination) 0.25f else 0.05f
-                    ).apply {
-                        // World Shift Math
-                        val offsetX = node.x - startNode.x
-                        val offsetY = node.y - startNode.y
-                        val offsetZ = node.z - startNode.z
-                        position = Position(offsetX, offsetY, offsetZ)
+                    // 2. Determine how many spheres to place (one every 0.5 meters)
+                    val interval = 0.5f
+                    val pointsCount = (distance / interval).toInt()
 
-                        // 4. Orientation (If it's an arrow, make it look forward)
-                        if (isEveryFifth && !isDestination) {
-                            // Advanced: You could calculate rotation here to point to next node
-                            // For now, keeping it simple
+                    for (j in 0..pointsCount) {
+                        // 3. Math: Find the exact coordinate for this breadcrumb
+                        val t = j.toFloat() / pointsCount.toFloat()
+                        val currX = nodeA.x + t * dx
+                        val currY = nodeA.y + t * dy
+                        val currZ = nodeA.z + t * dz
+
+                        // 4. Offset relative to the Start Node (World Sync)
+                        val offsetX = currX - startNode.x
+                        val offsetY = currY - startNode.y
+                        val offsetZ = currZ - startNode.z
+
+                        // 5. Place the sphere
+                        val breadcrumb = ModelNode(
+                            modelInstance = sphereModel,
+                            scaleToUnits = 0.04f // Slightly smaller for a "trail" look
+                        ).apply {
+                            position = Position(offsetX, offsetY, offsetZ)
                         }
+                        sceneView.addChildNode(breadcrumb)
+                        placedPathNodes.add(breadcrumb)
                     }
-
-                    sceneView.addChildNode(pathNode)
-                    placedPathNodes.add(pathNode)
                 }
 
-                runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Navigation Started!", Toast.LENGTH_SHORT).show()
+                // 6. Place the final Destination Marker at the very last node
+                val lastNode = path.last()
+                val destinationNode = ModelNode(
+                    modelInstance = destinationModel,
+                    scaleToUnits = 0.25f
+                ).apply {
+                    position = Position(lastNode.x - startNode.x, lastNode.y - startNode.y, lastNode.z - startNode.z)
                 }
+                sceneView.addChildNode(destinationNode)
+                placedPathNodes.add(destinationNode)
             }
         }
     }
@@ -582,12 +591,24 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatusMessage() {
         runOnUiThread {
             when {
-                isSearchingForLocation -> instructionText.text = "Point camera at a door or known marker to sync."
-                isHosting -> instructionText.text = "Google is learning this spot... walk in a slow circle."
-                isResolving -> instructionText.text = "Finding your location... hold still."
-                isUserMode && !isSearchingForLocation -> instructionText.text = "Follow the green path to your destination."
-                !isUserMode && !isSearchingForLocation -> instructionText.text = "Tap floor to place a new node."
-                else -> instructionText.text = "Move phone slowly to scan floor."
+                // This is the phrase for when the app is looking for ANY known point
+                isSearchingForLocation -> {
+                    instructionText.text = "Analyzing visual geometry to triangulate position..."
+                }
+
+                // This is for when the user is waiting for Google to save a point
+                isHosting -> {
+                    instructionText.text = "Mapping local feature points to Google Cloud..."
+                }
+
+                // This is the phrase for when a specific navigation start point is being found
+                isResolving -> {
+                    instructionText.text = "Verifying spatial coordinates within 10cm accuracy..."
+                }
+
+                isUserMode && !isSearchingForLocation -> instructionText.text = "Path synchronized. Follow the trail."
+                !isUserMode && !isSearchingForLocation -> instructionText.text = "System ready. Tap floor to digitize node."
+                else -> instructionText.text = "Aligning AR sensors..."
             }
         }
     }
