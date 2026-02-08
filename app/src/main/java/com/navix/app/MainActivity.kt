@@ -45,6 +45,11 @@ class MainActivity : AppCompatActivity() {
 
     private var navigationStartNode: Node? = null
 
+    // Map to link Google's Cloud ID to our Node data
+    private val cloudAnchorMap = mutableMapOf<String, Node>()
+    private var detectedStartNode: Node? = null
+    private var isSearchingForLocation = false
+
     // Inside onCreate
     private fun setupFloorSpinner() {
         val floorSpinner = findViewById<android.widget.Spinner>(R.id.floorSpinner)
@@ -73,6 +78,20 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         sceneView = findViewById(R.id.sceneView)
+        sceneView.configureSession { session, config ->
+            // This is the "Switch" that turns on Cloud Anchors
+            config.cloudAnchorMode = com.google.ar.core.Config.CloudAnchorMode.ENABLED
+
+            // Optional: Enable Autofocus for better scanning
+            config.focusMode = com.google.ar.core.Config.FocusMode.AUTO
+        }
+        sceneView.configureSession { session, config ->
+            // This is the "Switch" that turns on Cloud Anchors
+            config.cloudAnchorMode = com.google.ar.core.Config.CloudAnchorMode.ENABLED
+
+            // Optional: Enable Autofocus for better scanning
+            config.focusMode = com.google.ar.core.Config.FocusMode.AUTO
+        }
 
         // 1. SETUP SESSION UPDATE LOOP (For Hosting Checks)
         progressBar = findViewById(R.id.loadingProgressBar)
@@ -80,6 +99,33 @@ class MainActivity : AppCompatActivity() {
 
         sceneView.onSessionUpdated = { session, frame ->
             latestFrame = frame
+
+            // --- AUTO-LOCATION DETECTION ---
+            if (isUserMode && isSearchingForLocation) {
+                // Check every anchor the session is currently tracking
+                val allAnchors = session.allAnchors
+                for (anchor in allAnchors) {
+                    // If Google found a match for one of our IDs
+                    if (anchor.cloudAnchorState == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
+                        val cloudId = anchor.cloudAnchorId
+
+                        if (cloudAnchorMap.containsKey(cloudId)) {
+                            // MATCH FOUND!
+                            detectedStartNode = cloudAnchorMap[cloudId]
+                            isSearchingForLocation = false
+                            hideLoading()
+
+                            // Success Feedback
+                            runOnUiThread {
+                                Toast.makeText(this, "Location found: ${detectedStartNode?.name ?: "Hallway"}", Toast.LENGTH_LONG).show()
+                                // NOW show the destination picker, because we know where we are!
+                                showDestinationPickerOnly()
+                            }
+                            break
+                        }
+                    }
+                }
+            }
 
             // --- CHECK HOSTING (Admin Mode) ---
             if (isHosting && pendingAnchor != null) {
@@ -125,12 +171,23 @@ class MainActivity : AppCompatActivity() {
         val mode = intent.getStringExtra("mode")
         if (mode == "USER") {
             isUserMode = true
-            Toast.makeText(this, "User Mode", Toast.LENGTH_SHORT).show()
-            // Ensure session is created before showing picker
+            isSearchingForLocation = true
+            showLoading("Scanning room... Point camera at floor.")
+
             sceneView.onSessionCreated = { _ ->
-                runOnUiThread {
-                    showDestinationPicker()
-                }
+                // 1. Download all nodes from Firebase
+                db.collection("maps").document(currentFloorId).collection("nodes").get()
+                    .addOnSuccessListener { result ->
+                        val allNodes = result.toObjects(Node::class.java)
+
+                        // 2. Tell ARCore to start looking for every Cloud Anchor ID we have
+                        allNodes.forEach { node ->
+                            node.cloudAnchorId?.let { cloudId ->
+                                cloudAnchorMap[cloudId] = node // Remember which node matches this ID
+                                sceneView.session?.resolveCloudAnchor(cloudId) // Start searching
+                            }
+                        }
+                    }
             }
         } else {
             isUserMode = false
@@ -229,16 +286,20 @@ class MainActivity : AppCompatActivity() {
         try {
             val session = sceneView.session
             if (session != null) {
-                // This starts the upload to Google Cloud
                 pendingAnchor = session.hostCloudAnchor(localAnchor)
-                isHosting = true
-            } else {
-                hideLoading()
-                Toast.makeText(this, "AR Session not ready", Toast.LENGTH_SHORT).show()
+
+                if (pendingAnchor == null) {
+                    hideLoading()
+                    Toast.makeText(this, "Session Config Error: Cloud Anchors not enabled", Toast.LENGTH_LONG).show()
+                } else {
+                    isHosting = true
+                }
             }
         } catch (e: Exception) {
             hideLoading()
-            Toast.makeText(this, "Error starting host: ${e.message}", Toast.LENGTH_LONG).show()
+            // This will now print the actual technical error to your Logcat
+            android.util.Log.e("NaviX", "Hosting failed", e)
+            Toast.makeText(this, "Error: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
         }
 
         // NOTE: We DO NOT call showNameDialog here.
@@ -519,5 +580,22 @@ class MainActivity : AppCompatActivity() {
             progressBar.visibility = android.view.View.GONE
             statusText.visibility = android.view.View.GONE
         }
+    }
+
+    private fun showDestinationPickerOnly() {
+        // Get all the destinations from the map we already downloaded
+        val allNodes = cloudAnchorMap.values.toList()
+        val destinations = allNodes.filter { !it.name.isNullOrEmpty() }
+        val names = destinations.map { it.name!! }.toTypedArray()
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("You are at ${detectedStartNode?.name}. Go where?")
+            .setItems(names) { _, which ->
+                val target = destinations[which]
+                // Start navigation using the DETECTED node as the start
+                startNavigation(detectedStartNode!!, target, allNodes)
+            }
+            .setCancelable(false)
+            .show()
     }
 }

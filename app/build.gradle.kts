@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.navix.app"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.navix.app"
