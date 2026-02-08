@@ -27,10 +27,10 @@ class MainActivity : AppCompatActivity() {
     private var lastNodeId: String? = null
     private var isModelLoaded = false
     private var isUserMode = false
-    private val placedAnchorNodes = mutableListOf<AnchorNode>()
-
     private var pendingAnchor: com.google.ar.core.Anchor? = null
     private var isHosting = false
+
+    private lateinit var instructionText: android.widget.TextView
 
     // Inside MainActivity class
     private var currentFloorId = "floor_1" // Default
@@ -41,8 +41,8 @@ class MainActivity : AppCompatActivity() {
     private var resolvingAnchor: com.google.ar.core.Anchor? = null
     private var isResolving = false
 
-    private val placedPathNodes = mutableListOf<io.github.sceneview.node.ModelNode>()
-
+    // Change this at the top of MainActivity
+    private val placedPathNodes = mutableListOf<io.github.sceneview.node.Node>()
     private var navigationStartNode: Node? = null
 
     // Map to link Google's Cloud ID to our Node data
@@ -51,75 +51,50 @@ class MainActivity : AppCompatActivity() {
     private var isSearchingForLocation = false
 
     // Inside onCreate
-    private fun setupFloorSpinner() {
-        val floorSpinner = findViewById<android.widget.Spinner>(R.id.floorSpinner)
-        // Check if view exists (it might be hidden in User mode, but good to check)
-        if (floorSpinner != null && !isUserMode) {
-            val floors = arrayOf("floor_1", "floor_2", "floor_3")
-            val adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, floors)
-            floorSpinner.adapter = adapter
-
-            floorSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: android.widget.AdapterView<*>, view: android.view.View?, position: Int, id: Long) {
-                    currentFloorId = floors[position]
-                    lastNodeId = null // Reset linking when switching floors
-                    Toast.makeText(this@MainActivity, "Switched to $currentFloorId", Toast.LENGTH_SHORT).show()
-                }
-                override fun onNothingSelected(parent: android.widget.AdapterView<*>) {}
-            }
-        } else {
-            // Hide controls in User Mode
-            findViewById<android.view.View>(R.id.adminControls)?.visibility = android.view.View.GONE
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 1. SET CONTENT VIEW FIRST (Crucial!)
         setContentView(R.layout.activity_main)
 
+        // 2. INITIALIZE ALL VIEWS (Must happen after setContentView)
         sceneView = findViewById(R.id.sceneView)
-        sceneView.configureSession { session, config ->
-            // This is the "Switch" that turns on Cloud Anchors
-            config.cloudAnchorMode = com.google.ar.core.Config.CloudAnchorMode.ENABLED
-
-            // Optional: Enable Autofocus for better scanning
-            config.focusMode = com.google.ar.core.Config.FocusMode.AUTO
-        }
-        sceneView.configureSession { session, config ->
-            // This is the "Switch" that turns on Cloud Anchors
-            config.cloudAnchorMode = com.google.ar.core.Config.CloudAnchorMode.ENABLED
-
-            // Optional: Enable Autofocus for better scanning
-            config.focusMode = com.google.ar.core.Config.FocusMode.AUTO
-        }
-
-        // 1. SETUP SESSION UPDATE LOOP (For Hosting Checks)
         progressBar = findViewById(R.id.loadingProgressBar)
         statusText = findViewById(R.id.statusText)
+        instructionText = findViewById(R.id.instructionText)
 
+        // 3. CONFIGURE AR SESSION (Enable Cloud Anchors)
+        sceneView.configureSession { _, config ->
+            config.cloudAnchorMode = com.google.ar.core.Config.CloudAnchorMode.ENABLED
+            config.focusMode = com.google.ar.core.Config.FocusMode.AUTO
+        }
+
+        // 4. MAIN UPDATE LOOP (Checking Cloud States & UI messages)
         sceneView.onSessionUpdated = { session, frame ->
             latestFrame = frame
 
-            // --- AUTO-LOCATION DETECTION ---
-            if (isUserMode && isSearchingForLocation) {
-                // Check every anchor the session is currently tracking
+            // A. AUTO-LOCATION DETECTION (Syncing Admin or User to the floor)
+            if (isSearchingForLocation) {
                 val allAnchors = session.allAnchors
                 for (anchor in allAnchors) {
-                    // If Google found a match for one of our IDs
                     if (anchor.cloudAnchorState == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
                         val cloudId = anchor.cloudAnchorId
 
                         if (cloudAnchorMap.containsKey(cloudId)) {
-                            // MATCH FOUND!
+                            // PHYSICAL MATCH FOUND!
                             detectedStartNode = cloudAnchorMap[cloudId]
                             isSearchingForLocation = false
                             hideLoading()
 
-                            // Success Feedback
                             runOnUiThread {
-                                Toast.makeText(this, "Location found: ${detectedStartNode?.name ?: "Hallway"}", Toast.LENGTH_LONG).show()
-                                // NOW show the destination picker, because we know where we are!
-                                showDestinationPickerOnly()
+                                if (isUserMode) {
+                                    Toast.makeText(this, "Location found: ${detectedStartNode?.name ?: "Hallway"}", Toast.LENGTH_LONG).show()
+                                    showDestinationPickerOnly()
+                                } else {
+                                    lastNodeId = detectedStartNode?.id
+                                    loadExistingMap()
+                                    Toast.makeText(this, "Map Synced! Ready to continue.", Toast.LENGTH_LONG).show()
+                                }
                             }
                             break
                         }
@@ -127,7 +102,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // --- CHECK HOSTING (Admin Mode) ---
+            // B. CHECK HOSTING (Admin Mode Saving)
             if (isHosting && pendingAnchor != null) {
                 val state = pendingAnchor!!.cloudAnchorState
                 if (state == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
@@ -135,8 +110,6 @@ class MainActivity : AppCompatActivity() {
                     hideLoading()
                     val cloudId = pendingAnchor!!.cloudAnchorId
                     val pose = pendingAnchor!!.pose
-
-                    // FIX: Must use runOnUiThread to show the Dialog from the AR thread
                     runOnUiThread {
                         showNameDialog(pose.tx(), pose.ty(), pose.tz(), cloudId)
                     }
@@ -149,15 +122,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // --- CHECK RESOLVING (User Mode) ---
+            // C. CHECK RESOLVING (Specific Navigation Sync)
             if (isResolving && resolvingAnchor != null) {
                 val state = resolvingAnchor!!.cloudAnchorState
                 if (state == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
                     isResolving = false
                     hideLoading()
                     runOnUiThread {
-                        Toast.makeText(this, "Location Synced!", Toast.LENGTH_SHORT).show()
-                        proceedToDrawPath() // Trigger the path drawing
+                        Toast.makeText(this, "Destination Sync Successful!", Toast.LENGTH_SHORT).show()
+                        proceedToDrawPath()
                     }
                 } else if (state.isError) {
                     isResolving = false
@@ -165,62 +138,28 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread { Toast.makeText(this, "Sync Failed: $state", Toast.LENGTH_LONG).show() }
                 }
             }
+
+            // D. UPDATE THE TOP INSTRUCTION TEXT
+            updateStatusMessage()
         }
 
-        // 2. MODE SETUP
-        val mode = intent.getStringExtra("mode")
-        if (mode == "USER") {
-            isUserMode = true
-            isSearchingForLocation = true
-            showLoading("Scanning room... Point camera at floor.")
+        // 5. RUN LOGIC SETUP
+        setupMode() // Handles Database fetch
+        setupFloorSpinner() // Initializes Dropdown
+        loadPreviewModel() // Loads 3D Marker
 
-            sceneView.onSessionCreated = { _ ->
-                // 1. Download all nodes from Firebase
-                db.collection("maps").document(currentFloorId).collection("nodes").get()
-                    .addOnSuccessListener { result ->
-                        val allNodes = result.toObjects(Node::class.java)
-
-                        // 2. Tell ARCore to start looking for every Cloud Anchor ID we have
-                        allNodes.forEach { node ->
-                            node.cloudAnchorId?.let { cloudId ->
-                                cloudAnchorMap[cloudId] = node // Remember which node matches this ID
-                                sceneView.session?.resolveCloudAnchor(cloudId) // Start searching
-                            }
-                        }
-                    }
-            }
-        } else {
-            isUserMode = false
-            Toast.makeText(this, "Admin Mode", Toast.LENGTH_SHORT).show()
-            // Setup Spinner
-            setupFloorSpinner()
-            // Load existing map
-            sceneView.onSessionCreated = { _ ->
-                loadExistingMap()
-            }
-        }
-
-        // 3. LOAD MARKER MODEL
-        loadPreviewModel()
-
-        // 4. SET UP AR TAP LISTENER
+        // 6. TAP GESTURE (For Admin Mapping)
         sceneView.setOnGestureListener(
             onSingleTapConfirmed = { motionEvent, _ ->
-                if (isUserMode || !isModelLoaded) return@setOnGestureListener
-
-                // Prevent double taps while hosting
-                if (isHosting) {
-                    Toast.makeText(this, "Wait, still hosting...", Toast.LENGTH_SHORT).show()
-                    return@setOnGestureListener
-                }
+                // Logic to prevent tapping while searching or in User mode
+                if (isUserMode || !isModelLoaded || isSearchingForLocation || isHosting) return@setOnGestureListener
 
                 val frame = latestFrame ?: return@setOnGestureListener
                 val hitResults = frame.hitTest(motionEvent)
 
                 for (hit in hitResults) {
                     val trackable = hit.trackable
-                    if (
-                        trackable is com.google.ar.core.Plane &&
+                    if (trackable is com.google.ar.core.Plane &&
                         trackable.type == com.google.ar.core.Plane.Type.HORIZONTAL_UPWARD_FACING &&
                         trackable.isPoseInPolygon(hit.hitPose)
                     ) {
@@ -254,56 +193,35 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun placeMarkerAtHit(hitResult: HitResult) {
-        // 1. Create a standard local anchor from the tap
         val localAnchor = hitResult.createAnchor()
-
-        // 2. Create an AnchorNode (The 3D "hook" in the real world)
         val anchorNode = AnchorNode(sceneView.engine, localAnchor)
 
-        // 3. Load and show the visual marker immediately
         lifecycleScope.launch {
-            val modelInstance = sceneView.modelLoader.loadModelInstance("models/marker.glb")
-            if (modelInstance != null) {
+            sceneView.modelLoader.loadModelInstance("models/marker.glb")?.let {
                 val markerModelNode = ModelNode(
-                    modelInstance = modelInstance,
-                    scaleToUnits = 0.2f,
+                    modelInstance = it,
+                    autoAnimate = true,
+                    scaleToUnits = 0.2f, // 20cm marker
                     centerOrigin = Position(y = -0.5f)
                 )
-
-                // Attach visual to the anchor and add to the scene
                 anchorNode.addChildNode(markerModelNode)
                 sceneView.addChildNode(anchorNode)
 
-                // Track this node so we can remove it if needed
-                placedAnchorNodes.add(anchorNode)
+                // TRACKING: Add to our unified list for clearing
+                placedPathNodes.add(anchorNode)
             }
         }
 
-        // 4. TRIGGER CLOUD HOSTING
-        // We show the loading screen because this takes 5-10 seconds
-        showLoading("Hosting point... Move your phone slowly around the marker.")
-
+        showLoading("Uploading to Google Cloud... Walk in a slow circle.")
         try {
-            val session = sceneView.session
-            if (session != null) {
-                pendingAnchor = session.hostCloudAnchor(localAnchor)
-
-                if (pendingAnchor == null) {
-                    hideLoading()
-                    Toast.makeText(this, "Session Config Error: Cloud Anchors not enabled", Toast.LENGTH_LONG).show()
-                } else {
-                    isHosting = true
-                }
-            }
+            pendingAnchor = sceneView.session?.hostCloudAnchor(localAnchor)
+            isHosting = (pendingAnchor != null)
         } catch (e: Exception) {
-            hideLoading()
-            // This will now print the actual technical error to your Logcat
-            android.util.Log.e("NaviX", "Hosting failed", e)
-            Toast.makeText(this, "Error: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            runOnUiThread {
+                hideLoading()
+                Toast.makeText(this, "Cloud Anchor System Busy", Toast.LENGTH_SHORT).show()
+            }
         }
-
-        // NOTE: We DO NOT call showNameDialog here.
-        // We must wait for the SUCCESS state in the onSessionUpdated loop.
     }
 
     private fun showNameDialog(x: Float, y: Float, z: Float, cloudId: String) {
@@ -356,29 +274,6 @@ class MainActivity : AppCompatActivity() {
         lastNodeId = newNode.id
     }
 
-    private fun showDestinationPicker() {
-        Toast.makeText(this, "Loading Map...", Toast.LENGTH_SHORT).show()
-
-        db.collection("maps").document("floor_1")
-            .collection("nodes").get()
-            .addOnSuccessListener { result ->
-                val allNodes = result.toObjects(Node::class.java)
-
-                // Filter only named nodes (Locations)
-                val namedNodes = allNodes.filter { !it.name.isNullOrEmpty() }
-
-                if (namedNodes.size < 2) {
-                    Toast.makeText(this, "Need at least 2 named locations to navigate!", Toast.LENGTH_LONG).show()
-                    return@addOnSuccessListener
-                }
-
-                // STEP 1: Ask for START Location
-                showStartSelectionDialog(namedNodes, allNodes)
-            }
-            .addOnFailureListener { e ->
-                Toast.makeText(this, "Error loading map: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-    }
 
     private fun showStartSelectionDialog(namedNodes: List<Node>, allNodes: List<Node>) {
         val names = namedNodes.map { it.name!! }.toTypedArray()
@@ -443,40 +338,66 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private fun findClosestNode(allNodes: List<Node>): Node {
-        return allNodes.firstOrNull { it.name != null } ?: allNodes.first()
-    }
-
     private fun drawPathInAR(path: List<Node>, startNode: Node) {
-        clearPath()
+        clearPath() // Wipe previous path
 
         lifecycleScope.launch {
-            val modelInstance = sceneView.modelLoader.loadModelInstance("models/sphere.glb")
+            // 1. Pre-load all three models once to keep the app fast
+            val sphereModel = sceneView.modelLoader.loadModelInstance("models/sphere.glb")
+            val markerModel = sceneView.modelLoader.loadModelInstance("models/marker.glb")
+            val arrowModel = sceneView.modelLoader.loadModelInstance("models/arrow.glb") // Optional
 
-            if (modelInstance != null) {
-                path.forEach { node ->
-                    val sphereModelNode = io.github.sceneview.node.ModelNode(
-                        modelInstance = modelInstance,
-                        scaleToUnits = 0.05f
+            if (sphereModel != null && markerModel != null) {
+                path.forEachIndexed { index, node ->
+
+                    // 2. Decide which model to use
+                    val isDestination = (index == path.size - 1)
+                    val isEveryFifth = (index % 5 == 0 && index != 0)
+
+                    // Pick the model instance
+                    val selectedInstance = when {
+                        isDestination -> markerModel
+                        isEveryFifth && arrowModel != null -> arrowModel
+                        else -> sphereModel
+                    }
+
+                    // 3. Create the node
+                    val pathNode = ModelNode(
+                        modelInstance = selectedInstance,
+                        // Make destination much larger (25cm) than breadcrumbs (5cm)
+                        scaleToUnits = if (isDestination) 0.25f else 0.05f
                     ).apply {
-                        // --- THE WORLD-SHIFT MATH ---
-                        // Subtract startNode coordinates to make the path relative to your current anchor
+                        // World Shift Math
                         val offsetX = node.x - startNode.x
                         val offsetY = node.y - startNode.y
                         val offsetZ = node.z - startNode.z
+                        position = Position(offsetX, offsetY, offsetZ)
 
-                        position = io.github.sceneview.math.Position(offsetX, offsetY, offsetZ)
+                        // 4. Orientation (If it's an arrow, make it look forward)
+                        if (isEveryFifth && !isDestination) {
+                            // Advanced: You could calculate rotation here to point to next node
+                            // For now, keeping it simple
+                        }
                     }
-                    sceneView.addChildNode(sphereModelNode)
-                    placedPathNodes.add(sphereModelNode) // Fixed list type
+
+                    sceneView.addChildNode(pathNode)
+                    placedPathNodes.add(pathNode)
+                }
+
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Navigation Started!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
+
     private fun clearPath() {
-        // Remove all children that are NOT the main preview marker
-        val nodesToRemove = sceneView.childNodes.filter { it != previewModelNode }
-        nodesToRemove.forEach { sceneView.removeChildNode(it) }
+        // Remove every node we tracked from the 3D scene
+        placedPathNodes.forEach { node ->
+            sceneView.removeChildNode(node)
+        }
+        // Empty the list so it's ready for the next path
+        placedPathNodes.clear()
     }
 
     override fun onResume() {
@@ -598,4 +519,78 @@ class MainActivity : AppCompatActivity() {
             .setCancelable(false)
             .show()
     }
+
+    private fun setupMode() {
+        val mode = intent.getStringExtra("mode")
+        isUserMode = (mode == "USER")
+
+        // BOTH modes now start by searching for physical anchors
+        isSearchingForLocation = true
+        showLoading("Scanning environment to sync map...")
+
+        sceneView.onSessionCreated = { _ ->
+            // Download the floor map immediately
+            db.collection("maps").document(currentFloorId).collection("nodes").get()
+                .addOnSuccessListener { result ->
+                    val allNodes = result.toObjects(Node::class.java)
+
+                    if (allNodes.isEmpty()) {
+                        // BRAND NEW MAP: Nothing to find.
+                        if (!isUserMode) {
+                            isSearchingForLocation = false
+                            hideLoading()
+                            Toast.makeText(this, "New floor! Start tapping to map.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            hideLoading()
+                            Toast.makeText(this, "Error: No map exists for this floor.", Toast.LENGTH_LONG).show()
+                        }
+                    } else {
+                        // EXISTING MAP: Tell ARCore to find every cloud ID we have in Firebase
+                        allNodes.forEach { node ->
+                            node.cloudAnchorId?.let { cloudId ->
+                                cloudAnchorMap[cloudId] = node
+                                sceneView.session?.resolveCloudAnchor(cloudId)
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun setupFloorSpinner() {
+        val floorSpinner = findViewById<android.widget.Spinner>(R.id.floorSpinner) ?: return
+        if (isUserMode) {
+            findViewById<android.view.View>(R.id.adminControls)?.visibility = android.view.View.GONE
+            return
+        }
+        val floors = arrayOf("floor_1", "floor_2", "floor_3")
+        floorSpinner.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, floors)
+        floorSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p0: android.widget.AdapterView<*>?, p1: android.view.View?, pos: Int, p3: Long) {
+                if (currentFloorId != floors[pos]) {
+                    currentFloorId = floors[pos]
+                    lastNodeId = null
+                    cloudAnchorMap.clear()
+                    clearPath()
+                    setupMode() // Refresh data for new floor
+                }
+            }
+            override fun onNothingSelected(p0: android.widget.AdapterView<*>?) {}
+        }
+    }
+
+    private fun updateStatusMessage() {
+        runOnUiThread {
+            when {
+                isSearchingForLocation -> instructionText.text = "Point camera at a door or known marker to sync."
+                isHosting -> instructionText.text = "Google is learning this spot... walk in a slow circle."
+                isResolving -> instructionText.text = "Finding your location... hold still."
+                isUserMode && !isSearchingForLocation -> instructionText.text = "Follow the green path to your destination."
+                !isUserMode && !isSearchingForLocation -> instructionText.text = "Tap floor to place a new node."
+                else -> instructionText.text = "Move phone slowly to scan floor."
+            }
+        }
+    }
+
+
 }
