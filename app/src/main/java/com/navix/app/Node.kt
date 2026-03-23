@@ -7,10 +7,8 @@ data class Node(
     val z: Float = 0f,
     val neighborIds: List<String> = emptyList(),
     val name: String? = null,
-    val type: String = "WALKING",
-    // NEW FIELD
+    val type: String = "WALKING", // "WALKING", "STAIRS", "LIFT"
     val floorId: String = "floor_1",
-
     val cloudAnchorId: String? = null
 ) {
     // For Firestore serialization (Firestore requires empty constructor)

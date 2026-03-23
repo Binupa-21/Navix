@@ -61,6 +61,9 @@ class MainActivity : AppCompatActivity() {
     private var currentPath: List<Node>? = null
     private var isNavigating = false
 
+    private var currentPathIndex = 0
+    private var lastInstructionUpdateMillis = 0L
+
     // Inside onCreate
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -156,8 +159,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            if (isNavigating && finalPath != null && navigationStartNode != null) {
+                checkArrivalAtLift(finalPath!!, navigationStartNode!!)
+            }
+
             // D. UPDATE THE TOP INSTRUCTION TEXT
             updateStatusMessage()
+
+            if (isNavigating && finalPath != null && !isSearchingForLocation) {
+                updateLiveInstructions()
+            }
         }
 
         // 6. RUN LOGIC SETUP
@@ -401,6 +412,7 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun drawPathInAR(path: List<Node>, startNode: Node) {
+        currentPathIndex = 0
         // 1. Safety Check: We MUST have a physical origin anchor
         val anchor = resolvingAnchor ?: run {
             runOnUiThread { Toast.makeText(this, "Rescan the floor to align path.", Toast.LENGTH_SHORT).show() }
@@ -785,6 +797,106 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             sphereModel = sceneView.modelLoader.loadModelInstance("models/sphere.glb")
             markerModelCached = sceneView.modelLoader.loadModelInstance("models/marker.glb")
+        }
+    }
+
+    private fun calculateDistanceToNode(cameraPose: com.google.ar.core.Pose, node: Node, startNode: Node): Float {
+        // We must use the same "World Shift Math" we used to draw the path
+        val nodeRelX = node.x - startNode.x
+        val nodeRelY = node.y - startNode.y
+        val nodeRelZ = node.z - startNode.z
+
+        return Math.sqrt(
+            Math.pow((cameraPose.tx() - nodeRelX).toDouble(), 2.0) +
+                    Math.pow((cameraPose.ty() - nodeRelY).toDouble(), 2.0) +
+                    Math.pow((cameraPose.tz() - nodeRelZ).toDouble(), 2.0)
+        ).toFloat()
+    }
+
+    private fun checkArrivalAtLift(path: List<Node>, startNode: Node) {
+        // Only check if we are currently navigating
+        if (!isNavigating) return
+
+        val cameraPose = latestFrame?.camera?.pose ?: return
+
+        // Look for the "LIFT" node in our current path
+        val liftNode = path.find { it.type == "LIFT" || it.name?.contains("Lift", true) == true } ?: return
+
+        val distance = calculateDistanceToNode(cameraPose, liftNode, startNode)
+
+        // If within 1.5 meters of the lift
+        if (distance < 1.5f) {
+            // Stop navigation logic so the popup doesn't keep appearing
+            isNavigating = false
+
+            runOnUiThread {
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Change Floor")
+                    .setMessage("You have reached the lift. Please go to the next floor and press 'Arrived' to resync.")
+                    .setCancelable(false)
+                    .setPositiveButton("Arrived") { _, _ ->
+                        // This resets the app to scanning mode for the new floor
+                        // (You might need to manually set currentFloorId here)
+                        setupMode()
+                    }
+                    .show()
+            }
+        }
+    }
+
+    private fun getDistanceToNode(cameraPose: com.google.ar.core.Pose, targetNode: Node, startNode: Node): Float {
+        // Calculate the target node's position in the current AR world space
+        val worldTargetX = targetNode.x - startNode.x
+        val worldTargetY = targetNode.y - startNode.y
+        val worldTargetZ = targetNode.z - startNode.z
+
+        val dx = cameraPose.tx() - worldTargetX
+        val dy = cameraPose.ty() - worldTargetY
+        val dz = cameraPose.tz() - worldTargetZ
+
+        return Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+    }
+
+    private fun updateLiveInstructions() {
+        val path = finalPath ?: return
+        val startNode = navigationStartNode ?: return
+        val cameraPose = latestFrame?.camera?.pose ?: return
+
+        if (currentPathIndex >= path.size) {
+            runOnUiThread { instructionText.text = "You have arrived at your destination!" }
+            return
+        }
+
+        val targetNode = path[currentPathIndex]
+        val distance = getDistanceToNode(cameraPose, targetNode, startNode)
+
+        // 1. Check if user reached the current breadcrumb (within 0.8 meters)
+        if (distance < 0.8f) {
+            currentPathIndex++ // Move to next dot
+            // Remove the dot from the floor as the user passes it (Optional visual polish)
+            if (placedPathNodes.isNotEmpty() && currentPathIndex < placedPathNodes.size) {
+                // sceneView.removeChildNode(placedPathNodes[currentPathIndex - 1])
+            }
+        }
+
+        // 2. Logic for text instructions
+        runOnUiThread {
+            val remainingDistance = getDistanceToNode(cameraPose, path.last(), startNode)
+
+            when {
+                targetNode.type == "LIFT" -> {
+                    instructionText.text = "Enter the Lift (Distance: ${String.format("%.1f", distance)}m)"
+                }
+                targetNode.type == "STAIRS" -> {
+                    instructionText.text = "Climb stairs carefully (Distance: ${String.format("%.1f", distance)}m)"
+                }
+                currentPathIndex == path.size - 1 -> {
+                    instructionText.text = "Arriving at ${targetNode.name} in ${String.format("%.1f", distance)}m"
+                }
+                else -> {
+                    instructionText.text = "Follow path: ${String.format("%.1f", remainingDistance)}m to go"
+                }
+            }
         }
     }
 

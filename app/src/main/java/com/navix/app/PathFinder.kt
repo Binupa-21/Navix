@@ -77,12 +77,12 @@ class PathFinder {
     }
 
     // MATH: Calculate 3D distance between two nodes
+    // Inside your distance/cost function in PathFinder
     private fun calculateDistance(a: Node, b: Node): Float {
-        return sqrt(
-            (a.x - b.x).pow(2) +
-                    (a.y - b.y).pow(2) +
-                    (a.z - b.z).pow(2)
-        )
+        if (a.floorId != b.floorId) {
+            return 5.0f // Give lift transitions a "fixed cost" (e.g., equivalent to walking 5 meters)
+        }
+        return sqrt((a.x - b.x).pow(2) + (a.y - b.y).pow(2) + (a.z - b.z).pow(2))
     }
 
     // Helper: Walk backwards from End -> Start to build the final list
