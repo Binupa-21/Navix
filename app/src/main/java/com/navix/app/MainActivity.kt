@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private var isUserMode = false
     private var pendingAnchor: com.google.ar.core.Anchor? = null
     private var isHosting = false
+    private var pendingFloorId: String? = null
 
     // Cloud Anchor resolving can easily exhaust ARCore resources if we try to resolve too many at once.
     private val resolvedCloudAnchorIds = mutableSetOf<String>()
@@ -140,14 +141,16 @@ class MainActivity : AppCompatActivity() {
                 if (state == com.google.ar.core.Anchor.CloudAnchorState.SUCCESS) {
                     val cloudId = pendingAnchor!!.cloudAnchorId
                     val pose = pendingAnchor!!.pose
+                    val floorIdForNode = pendingFloorId ?: currentFloorId
                     isHosting = false
 
                     runOnUiThread {
                         hideLoading()
                         Toast.makeText(this, "Cloud Sync Successful!", Toast.LENGTH_SHORT).show()
-                        showNameDialog(pose.tx(), pose.ty(), pose.tz(), cloudId)
+                        showNameDialog(pose.tx(), pose.ty(), pose.tz(), cloudId, floorIdForNode)
                     }
                     pendingAnchor = null
+                    pendingFloorId = null
                 } else if (state.isError) {
                     isHosting = false
                     runOnUiThread {
@@ -155,6 +158,7 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this, "Hosting Failed: $state", Toast.LENGTH_LONG).show()
                     }
                     pendingAnchor = null
+                    pendingFloorId = null
                 }
             }
 
@@ -241,6 +245,9 @@ class MainActivity : AppCompatActivity() {
     private fun placeMarkerAtHit(hitResult: HitResult) {
         val localAnchor = hitResult.createAnchor()
         val anchorNode = AnchorNode(sceneView.engine, localAnchor)
+        // Capture the floor at the moment the user places the node.
+        // This prevents accidental saves to a different floor if the spinner is changed mid-hosting.
+        pendingFloorId = currentFloorId
 
         lifecycleScope.launch {
             sceneView.modelLoader.loadModelInstance("models/marker.glb")?.let {
@@ -267,10 +274,17 @@ class MainActivity : AppCompatActivity() {
                 hideLoading()
                 Toast.makeText(this, "Cloud Anchor System Busy", Toast.LENGTH_SHORT).show()
             }
+            pendingFloorId = null
         }
     }
 
-    private fun showNameDialog(x: Float, y: Float, z: Float, cloudId: String) {
+    private fun showNameDialog(
+        x: Float,
+        y: Float,
+        z: Float,
+        cloudId: String,
+        floorIdForNode: String
+    ) {
         val input = android.widget.EditText(this)
         input.hint = "Name (e.g. Lab 1)"
 
@@ -283,14 +297,23 @@ class MainActivity : AppCompatActivity() {
                 val type = if (name.equals("stairs", true)) "STAIRS" else "WALKING"
 
                 // Pass cloudId
-                createAndSaveNode(x, y, z, finalName, type, cloudId)
+                createAndSaveNode(x, y, z, finalName, type, cloudId, floorIdForNode)
 
             }
             .setNegativeButton("Cancel", null) // Note: Visual node stays, simple limitation
             .show()
     }
 
-    private fun createAndSaveNode(x: Float, y: Float, z: Float, name: String?, type: String, cloudId: String) {        val nodeId = "node_" + System.currentTimeMillis()
+    private fun createAndSaveNode(
+        x: Float,
+        y: Float,
+        z: Float,
+        name: String?,
+        type: String,
+        cloudId: String,
+        floorIdForNode: String
+    ) {
+        val nodeId = "node_" + System.currentTimeMillis()
         val neighbors = mutableListOf<String>()
         lastNodeId?.let { neighbors.add(it) }
 
@@ -310,8 +333,8 @@ class MainActivity : AppCompatActivity() {
             x = finalX, y = finalY, z = finalZ,
             neighborIds = neighbors,
             name = name?.ifEmpty { null },
-            type = "WALKING",
-            floorId = currentFloorId,
+            type = type,
+            floorId = floorIdForNode,
             cloudAnchorId = cloudId
         )
 
@@ -320,13 +343,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveNode(newNode: Node) {
         // 1. Save the new node to Firebase first
-        db.collection("maps").document(currentFloorId)
+        db.collection("maps").document(newNode.floorId)
             .collection("nodes").document(newNode.id).set(newNode)
             .addOnSuccessListener {
 
                 // 2. Logic to "Link" this node to the previous one
                 if (lastNodeId != null) {
-                    val prevDocRef = db.collection("maps").document(currentFloorId)
+                    val prevDocRef = db.collection("maps").document(newNode.floorId)
                         .collection("nodes").document(lastNodeId!!)
 
                     // Safety check: Make sure the previous node wasn't deleted manually in the console
@@ -541,12 +564,16 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         sceneView.destroy()
     }
-    private fun loadExistingMap() {
-        Toast.makeText(this, "Loading map for $currentFloorId...", Toast.LENGTH_SHORT).show()
+    private fun loadExistingMap(floorId: String = currentFloorId) {
+        Toast.makeText(this, "Loading map for $floorId...", Toast.LENGTH_SHORT).show()
+        val expectedFloorId = floorId
 
-        db.collection("maps").document(currentFloorId)
+        db.collection("maps").document(floorId)
             .collection("nodes").get()
             .addOnSuccessListener { result ->
+                // If the user switched floors while this request was in-flight, ignore this response.
+                if (expectedFloorId != currentFloorId) return@addOnSuccessListener
+
                 val nodes = result.toObjects(Node::class.java)
 
                 if (nodes.isEmpty()) {
@@ -576,12 +603,14 @@ class MainActivity : AppCompatActivity() {
                                     // Note: We need to cast markerNode to AnchorNode isn't possible here
                                     // because these are purely virtual ModelNodes (not anchored to AR planes).
                                     // So we just remove the visual.
-                                    showDeleteVirtualNodeDialog(node.id, markerNode)
+                                    showDeleteVirtualNodeDialog(node.id, markerNode, floorId)
                                 }
                                 true
                             }
 
                             sceneView.addChildNode(markerNode)
+                            // Track these "virtual" nodes so clearPath() removes them when changing floors.
+                            placedPathNodes.add(markerNode)
                         }
                     }
                     Toast.makeText(this@MainActivity, "${nodes.size} nodes loaded.", Toast.LENGTH_SHORT).show()
@@ -593,16 +622,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Helper to delete these "Virtual" loaded nodes
-    private fun showDeleteVirtualNodeDialog(nodeId: String, nodeToDelete: ModelNode) {
+    private fun showDeleteVirtualNodeDialog(nodeId: String, nodeToDelete: ModelNode, floorId: String = currentFloorId) {
         MaterialAlertDialogBuilder(this)
             .setTitle("Delete Node?")
             .setMessage("Remove this saved node?")
             .setPositiveButton("Delete") { _, _ ->
-                db.collection("maps").document(currentFloorId)
+                db.collection("maps").document(floorId)
                     .collection("nodes").document(nodeId)
                     .delete()
                     .addOnSuccessListener {
                         sceneView.removeChildNode(nodeToDelete)
+                        placedPathNodes.remove(nodeToDelete)
                         Toast.makeText(this, "Deleted", Toast.LENGTH_SHORT).show()
                     }
             }
@@ -687,110 +717,117 @@ class MainActivity : AppCompatActivity() {
             showUserInstructions()
         }
 
-        // 2. Wait for AR Session
+        // 2. Fetch and resolve Cloud Anchors for the selected floor.
+        // `onSessionCreated` may only fire once, so we call this immediately and also when the session is created.
         sceneView.onSessionCreated = { _ ->
+            fetchAndResolveForFloor(currentFloorId)
+        }
+        fetchAndResolveForFloor(currentFloorId)
+    }
 
-            // 3. Fetch data from Firebase
-            db.collection("maps").document(currentFloorId).collection("nodes").get()
-                .addOnSuccessListener { result ->
-                    val allNodes = result.toObjects(Node::class.java)
+    private fun fetchAndResolveForFloor(floorId: String) {
+        val requestedFloorId = floorId
 
-                    if (allNodes.isEmpty()) {
-                        // --- CASE A: BRAND NEW FLOOR ---
-                        hideLoading()
+        db.collection("maps").document(floorId).collection("nodes").get()
+            .addOnSuccessListener { result ->
+                // Ignore stale responses if the user switched floors while this request was in-flight.
+                if (requestedFloorId != currentFloorId) return@addOnSuccessListener
 
-                        if (!isUserMode) {
-                            // ADMIN: Unlock immediately and give specific instruction
-                            isSearchingForLocation = false
-                            runOnUiThread {
-                                instructionCard.visibility = android.view.View.VISIBLE
-                                instructionText.text = "New floor detected. Tap to place the first anchor."
-                                Toast.makeText(this, "Empty Floor: Start mapping anywhere.", Toast.LENGTH_LONG).show()
-                            }
-                        } else {
-                            // USER: Cannot navigate on an empty floor
-                            runOnUiThread {
-                                instructionCard.visibility = android.view.View.VISIBLE
-                                instructionText.text = "Error: No map data exists for this floor."
-                                Toast.makeText(this, "Please ask an admin to map this area.", Toast.LENGTH_LONG).show()
-                            }
+                val allNodes = result.toObjects(Node::class.java)
+
+                if (allNodes.isEmpty()) {
+                    // --- CASE A: BRAND NEW FLOOR ---
+                    hideLoading()
+
+                    if (!isUserMode) {
+                        // ADMIN: Unlock immediately and give specific instruction
+                        isSearchingForLocation = false
+                        runOnUiThread {
+                            instructionCard.visibility = android.view.View.VISIBLE
+                            instructionText.text = "New floor detected. Tap to place the first anchor."
+                            Toast.makeText(this, "Empty Floor: Start mapping anywhere.", Toast.LENGTH_LONG).show()
                         }
                     } else {
-                        // --- CASE B: EXISTING MAP ---
+                        // USER: Cannot navigate on an empty floor
                         runOnUiThread {
-                            Toast.makeText(this, "Map Loaded. Scan environment to align.", Toast.LENGTH_SHORT).show()
+                            instructionCard.visibility = android.view.View.VISIBLE
+                            instructionText.text = "Error: No map data exists for this floor."
+                            Toast.makeText(this, "Please ask an admin to map this area.", Toast.LENGTH_LONG).show()
                         }
+                    }
+                    return@addOnSuccessListener
+                }
 
-                        // Register all Cloud IDs for the AR engine to look for.
-                        // IMPORTANT: Do NOT resolve them all at once; ARCore throws ResourceExhaustedException.
-                        val cloudIdsToResolve = allNodes
-                            .mapNotNull { it.cloudAnchorId }
-                            .distinct()
+                // --- CASE B: EXISTING MAP ---
+                runOnUiThread {
+                    Toast.makeText(this, "Map Loaded. Scan environment to align.", Toast.LENGTH_SHORT).show()
+                }
 
-                        cloudIdsToResolve.forEach { cloudId ->
-                            allNodes.firstOrNull { it.cloudAnchorId == cloudId }?.let { node ->
-                                cloudAnchorMap[cloudId] = node
+                // Register all Cloud IDs for the AR engine to look for.
+                // IMPORTANT: Do NOT resolve them all at once; ARCore throws ResourceExhaustedException.
+                val cloudIdsToResolve = allNodes
+                    .mapNotNull { it.cloudAnchorId }
+                    .distinct()
+
+                // Update our lookup map so onSessionUpdated can match resolved anchors.
+                cloudAnchorMap.clear()
+                cloudIdsToResolve.forEach { cloudId ->
+                    allNodes.firstOrNull { it.cloudAnchorId == cloudId }?.let { node ->
+                        cloudAnchorMap[cloudId] = node
+                    }
+                }
+
+                // Resolve in a small, rate-limited loop to avoid ARCore resource exhaustion.
+                cloudResolveJob?.cancel()
+                cloudResolveJob = lifecycleScope.launch(Dispatchers.Main) {
+                    val maxToResolve = 30 // cap to keep ARCore stable; adjust if needed
+                    val ids = cloudIdsToResolve.take(maxToResolve)
+
+                    for (cloudId in ids) {
+                        if (!isActive) break
+                        if (resolvedCloudAnchorIds.contains(cloudId)) continue
+
+                        try {
+                            val session = sceneView.session
+                            if (session == null) break
+                            session.resolveCloudAnchor(cloudId)
+                            resolvedCloudAnchorIds.add(cloudId)
+                        } catch (e: ResourceExhaustedException) {
+                            isSearchingForLocation = false
+                            hideLoading()
+                            runOnUiThread {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Cloud sync is busy. Try rescanning.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            break
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Cloud anchor resolve error: ${e.message}",
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
 
-                        // Resolve in a small, rate-limited loop to avoid ARCore resource exhaustion.
-                        cloudResolveJob = lifecycleScope.launch(Dispatchers.Main) {
-                            val maxToResolve = 30 // cap to keep ARCore stable; adjust if needed
-                            val ids = cloudIdsToResolve.take(maxToResolve)
-
-                            for (cloudId in ids) {
-                                if (!isActive) break
-                                if (resolvedCloudAnchorIds.contains(cloudId)) continue
-
-                                try {
-                                    val session = sceneView.session
-                                    if (session == null) break
-                                    session.resolveCloudAnchor(cloudId)
-                                    resolvedCloudAnchorIds.add(cloudId)
-                                } catch (e: ResourceExhaustedException) {
-                                    // Stop resolving further to prevent hard crash; user can still succeed after some time.
-                                    isSearchingForLocation = false
-                                    hideLoading()
-                                    runOnUiThread {
-                                        Toast.makeText(
-                                            this@MainActivity,
-                                            "Cloud sync is busy. Try rescanning.",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    }
-                                    break
-                                } catch (e: Exception) {
-                                    // Non-fatal: try remaining IDs.
-                                    runOnUiThread {
-                                        Toast.makeText(
-                                            this@MainActivity,
-                                            "Cloud anchor resolve error: ${e.message}",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    }
-                                }
-
-                                // Rate limit between resolve calls.
-                                delay(400)
-                            }
-                        }
-
-                        // If Admin, show existing markers so they see the current layout
-                        if (!isUserMode) {
-                            loadExistingMap()
-                        }
+                        delay(400)
                     }
                 }
-                .addOnFailureListener { e ->
-                    hideLoading()
-                    isSearchingForLocation = false
-                    runOnUiThread {
-                        instructionCard.visibility = android.view.View.VISIBLE
-                        instructionText.text = "Connection Error."
-                        Toast.makeText(this, "Firebase Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                    }
+            }
+            .addOnFailureListener { e ->
+                if (requestedFloorId != currentFloorId) return@addOnFailureListener
+
+                hideLoading()
+                isSearchingForLocation = false
+                runOnUiThread {
+                    instructionCard.visibility = android.view.View.VISIBLE
+                    instructionText.text = "Connection Error."
+                    Toast.makeText(this, "Firebase Error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
-        }
+            }
     }
 
     private fun showUserInstructions() {
