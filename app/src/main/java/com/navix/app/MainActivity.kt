@@ -1,12 +1,17 @@
 package com.navix.app
 
 import android.os.Bundle
+import android.widget.Button
+import android.widget.ImageView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.ar.core.Frame
 import com.google.ar.core.HitResult
+import com.google.ar.core.exceptions.ResourceExhaustedException
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ktx.firestore
@@ -15,7 +20,12 @@ import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.node.AnchorNode
 import io.github.sceneview.math.Position
 import io.github.sceneview.node.ModelNode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
 
@@ -30,7 +40,14 @@ class MainActivity : AppCompatActivity() {
     private var pendingAnchor: com.google.ar.core.Anchor? = null
     private var isHosting = false
 
-    private lateinit var instructionText: android.widget.TextView
+    // Cloud Anchor resolving can easily exhaust ARCore resources if we try to resolve too many at once.
+    private val resolvedCloudAnchorIds = mutableSetOf<String>()
+    private var cloudResolveJob: Job? = null
+
+    private lateinit var instructionText: TextView
+    private lateinit var distanceText: TextView
+    private lateinit var instructionIcon: ImageView
+    private lateinit var instructionCard: MaterialCardView
 
     // Inside MainActivity class
     private var currentFloorId = "floor_1" // Default
@@ -44,7 +61,7 @@ class MainActivity : AppCompatActivity() {
 
 
     private lateinit var progressBar: android.widget.ProgressBar
-    private lateinit var statusText: android.widget.TextView
+    private lateinit var statusText: TextView
 
     private var resolvingAnchor: com.google.ar.core.Anchor? = null
     private var isResolving = false
@@ -62,7 +79,6 @@ class MainActivity : AppCompatActivity() {
     private var isNavigating = false
 
     private var currentPathIndex = 0
-    private var lastInstructionUpdateMillis = 0L
 
     // Inside onCreate
 
@@ -77,6 +93,9 @@ class MainActivity : AppCompatActivity() {
         progressBar = findViewById(R.id.loadingProgressBar)
         statusText = findViewById(R.id.statusText)
         instructionText = findViewById(R.id.instructionText)
+        distanceText = findViewById(R.id.distanceText)
+        instructionIcon = findViewById(R.id.instructionIcon)
+        instructionCard = findViewById(R.id.instructionCard)
 
         // 3. PRELOAD MODELS FOR PERFORMANCE
         preloadModels()
@@ -159,14 +178,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            if (isNavigating && finalPath != null && navigationStartNode != null) {
-                checkArrivalAtLift(finalPath!!, navigationStartNode!!)
+            if (isNavigating && currentPath != null && navigationStartNode != null) {
+                checkArrivalAtLift(currentPath!!, navigationStartNode!!)
             }
 
             // D. UPDATE THE TOP INSTRUCTION TEXT
             updateStatusMessage()
 
-            if (isNavigating && finalPath != null && !isSearchingForLocation) {
+            if (isNavigating && currentPath != null && !isSearchingForLocation) {
                 updateLiveInstructions()
             }
         }
@@ -278,9 +297,9 @@ class MainActivity : AppCompatActivity() {
         // --- THE ENGINE FIX ---
         // If we have synced to a cloud anchor, we adjust the incoming coordinates
         // to match the Cloud Anchor's coordinate space.
-        var finalX = x
-        var finalY = y
-        var finalZ = z
+        val finalX = x
+        val finalY = y
+        val finalZ = z
 
         // This is only needed if you are mapping relative to a PREVIOUSLY resolved anchor
         // For a 10-week project, the simplest way is to always "Start Mapping"
@@ -376,9 +395,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // Temporary variables to store info while waiting for Resolve
-    private var finalPath: List<Node>? = null
-
     private fun startNavigation(start: Node, end: Node, allNodes: List<Node>) {
         // 1. Calculate path in background
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.Default) {
@@ -405,8 +421,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun proceedToDrawPath() {
         // FIX: Pass both required parameters (Path and StartNode)
-        if (finalPath != null && navigationStartNode != null) {
-            drawPathInAR(finalPath!!, navigationStartNode!!)
+        if (currentPath != null && navigationStartNode != null) {
+            drawPathInAR(currentPath!!, navigationStartNode!!)
         }
     }
 
@@ -455,7 +471,7 @@ class MainActivity : AppCompatActivity() {
                 val dx = nodeB.x - nodeA.x
                 val dy = nodeB.y - nodeA.y
                 val dz = nodeB.z - nodeA.z
-                val distance = Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+                val distance = sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
 
                 // Draw a dot every 50cm
                 val interval = 0.5f
@@ -658,11 +674,18 @@ class MainActivity : AppCompatActivity() {
         // 1. Reset State
         lastNodeId = null
         cloudAnchorMap.clear()
+        cloudResolveJob?.cancel()
+        cloudResolveJob = null
+        resolvedCloudAnchorIds.clear()
         clearPath()
 
         // Default behavior: Start by searching for a physical sync point
         isSearchingForLocation = true
         showLoading("Syncing with Cloud...")
+
+        if (isUserMode) {
+            showUserInstructions()
+        }
 
         // 2. Wait for AR Session
         sceneView.onSessionCreated = { _ ->
@@ -680,12 +703,14 @@ class MainActivity : AppCompatActivity() {
                             // ADMIN: Unlock immediately and give specific instruction
                             isSearchingForLocation = false
                             runOnUiThread {
+                                instructionCard.visibility = android.view.View.VISIBLE
                                 instructionText.text = "New floor detected. Tap to place the first anchor."
                                 Toast.makeText(this, "Empty Floor: Start mapping anywhere.", Toast.LENGTH_LONG).show()
                             }
                         } else {
                             // USER: Cannot navigate on an empty floor
                             runOnUiThread {
+                                instructionCard.visibility = android.view.View.VISIBLE
                                 instructionText.text = "Error: No map data exists for this floor."
                                 Toast.makeText(this, "Please ask an admin to map this area.", Toast.LENGTH_LONG).show()
                             }
@@ -696,11 +721,57 @@ class MainActivity : AppCompatActivity() {
                             Toast.makeText(this, "Map Loaded. Scan environment to align.", Toast.LENGTH_SHORT).show()
                         }
 
-                        // Register all Cloud IDs for the AR engine to look for
-                        allNodes.forEach { node ->
-                            node.cloudAnchorId?.let { cloudId ->
+                        // Register all Cloud IDs for the AR engine to look for.
+                        // IMPORTANT: Do NOT resolve them all at once; ARCore throws ResourceExhaustedException.
+                        val cloudIdsToResolve = allNodes
+                            .mapNotNull { it.cloudAnchorId }
+                            .distinct()
+
+                        cloudIdsToResolve.forEach { cloudId ->
+                            allNodes.firstOrNull { it.cloudAnchorId == cloudId }?.let { node ->
                                 cloudAnchorMap[cloudId] = node
-                                sceneView.session?.resolveCloudAnchor(cloudId)
+                            }
+                        }
+
+                        // Resolve in a small, rate-limited loop to avoid ARCore resource exhaustion.
+                        cloudResolveJob = lifecycleScope.launch(Dispatchers.Main) {
+                            val maxToResolve = 30 // cap to keep ARCore stable; adjust if needed
+                            val ids = cloudIdsToResolve.take(maxToResolve)
+
+                            for (cloudId in ids) {
+                                if (!isActive) break
+                                if (resolvedCloudAnchorIds.contains(cloudId)) continue
+
+                                try {
+                                    val session = sceneView.session
+                                    if (session == null) break
+                                    session.resolveCloudAnchor(cloudId)
+                                    resolvedCloudAnchorIds.add(cloudId)
+                                } catch (e: ResourceExhaustedException) {
+                                    // Stop resolving further to prevent hard crash; user can still succeed after some time.
+                                    isSearchingForLocation = false
+                                    hideLoading()
+                                    runOnUiThread {
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "Cloud sync is busy. Try rescanning.",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                    break
+                                } catch (e: Exception) {
+                                    // Non-fatal: try remaining IDs.
+                                    runOnUiThread {
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "Cloud anchor resolve error: ${e.message}",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+
+                                // Rate limit between resolve calls.
+                                delay(400)
                             }
                         }
 
@@ -714,10 +785,29 @@ class MainActivity : AppCompatActivity() {
                     hideLoading()
                     isSearchingForLocation = false
                     runOnUiThread {
+                        instructionCard.visibility = android.view.View.VISIBLE
                         instructionText.text = "Connection Error."
                         Toast.makeText(this, "Firebase Error: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
+        }
+    }
+
+    private fun showUserInstructions() {
+        runOnUiThread {
+            val dialogView = layoutInflater.inflate(R.layout.dialog_user_instructions, null)
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+                .setView(dialogView)
+                .create()
+
+            // Make background transparent so our custom gradient corners show
+            dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
+
+            dialogView.findViewById<Button>(R.id.btnGotIt).setOnClickListener {
+                dialog.dismiss()
+            }
+
+            dialog.show()
         }
     }
 
@@ -746,22 +836,30 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatusMessage() {
         runOnUiThread {
             val count = cloudAnchorMap.size
+            instructionCard.visibility = android.view.View.VISIBLE
+            distanceText.visibility = android.view.View.GONE
+            instructionIcon.setImageResource(android.R.drawable.ic_menu_directions)
+
             when {
                 isNavigating -> {
-                    instructionText.text = "Navigation Active. Follow the path."
+                    distanceText.visibility = android.view.View.VISIBLE
                 }
                 isSearchingForLocation -> {
                     if (count == 0) {
-                        instructionText.text = "Map empty. Switch to Admin mode to add nodes."
+                        instructionText.text = "Map empty. Switch to Admin mode."
                     } else {
-                        instructionText.text = "Scanning for $count known points..."
+                        if (isUserMode) {
+                            instructionText.text = "Point camera at surroundings to sync."
+                        } else {
+                            instructionText.text = "Scanning for $count points..."
+                        }
                     }
                 }
                 isHosting -> {
-                    instructionText.text = "Saving location to Cloud..."
+                    instructionText.text = "Saving location..."
                 }
                 isResolving -> {
-                    instructionText.text = "Calculating precise path position..."
+                    instructionText.text = "Calculating path..."
                 }
                 else -> {
                     instructionText.text = "System Ready."
@@ -806,10 +904,10 @@ class MainActivity : AppCompatActivity() {
         val nodeRelY = node.y - startNode.y
         val nodeRelZ = node.z - startNode.z
 
-        return Math.sqrt(
-            Math.pow((cameraPose.tx() - nodeRelX).toDouble(), 2.0) +
-                    Math.pow((cameraPose.ty() - nodeRelY).toDouble(), 2.0) +
-                    Math.pow((cameraPose.tz() - nodeRelZ).toDouble(), 2.0)
+        return sqrt(
+            (cameraPose.tx() - nodeRelX).toDouble().pow(2.0) +
+                    (cameraPose.ty() - nodeRelY).toDouble().pow(2.0) +
+                    (cameraPose.tz() - nodeRelZ).toDouble().pow(2.0)
         ).toFloat()
     }
 
@@ -854,54 +952,86 @@ class MainActivity : AppCompatActivity() {
         val dy = cameraPose.ty() - worldTargetY
         val dz = cameraPose.tz() - worldTargetZ
 
-        return Math.sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
+        return sqrt((dx * dx + dy * dy + dz * dz).toDouble()).toFloat()
     }
 
     private fun updateLiveInstructions() {
-        val path = finalPath ?: return
+        val path = currentPath ?: return
         val startNode = navigationStartNode ?: return
         val cameraPose = latestFrame?.camera?.pose ?: return
 
-        if (currentPathIndex >= path.size) {
-            runOnUiThread { instructionText.text = "You have arrived at your destination!" }
-            return
-        }
-
-        val targetNode = path[currentPathIndex]
-        val distance = getDistanceToNode(cameraPose, targetNode, startNode)
-
-        // 1. Check if user reached the current breadcrumb (within 0.8 meters)
-        if (distance < 0.8f) {
-            currentPathIndex++ // Move to next dot
-            // Remove the dot from the floor as the user passes it (Optional visual polish)
-            if (placedPathNodes.isNotEmpty() && currentPathIndex < placedPathNodes.size) {
-                // sceneView.removeChildNode(placedPathNodes[currentPathIndex - 1])
+        // 1. Check if arrived at final destination
+        if (currentPathIndex >= path.size - 1) {
+            val finalDistance = getDistanceToNode(cameraPose, path.last(), startNode)
+            if (finalDistance < 0.8f) {
+                runOnUiThread {
+                    instructionText.text = "Arrived!"
+                    distanceText.text = "0.0m to destination"
+                    instructionIcon.setImageResource(android.R.drawable.checkbox_on_background)
+                    instructionIcon.rotation = 0f
+                }
+                return
             }
         }
 
-        // 2. Logic for text instructions
+        // 2. Advance waypoint if we are close to current target
+        var targetNode = path[currentPathIndex]
+        var distanceToTarget = getDistanceToNode(cameraPose, targetNode, startNode)
+
+        while (distanceToTarget < 1.2f && currentPathIndex < path.size - 1) {
+            currentPathIndex++
+            targetNode = path[currentPathIndex]
+            distanceToTarget = getDistanceToNode(cameraPose, targetNode, startNode)
+        }
+
+        // 3. Logic for directions based on camera facing vs target direction
         runOnUiThread {
-            val remainingDistance = getDistanceToNode(cameraPose, path.last(), startNode)
+            val totalRemaining = getDistanceToNode(cameraPose, path.last(), startNode)
+            distanceText.text = "${String.format("%.1f", totalRemaining)}m to destination"
+
+            // Get Camera Forward Vector (ARCore: -Z is forward in local space)
+            val cameraZ = cameraPose.zAxis
+            val forwardX = -cameraZ[0]
+            val forwardZ = -cameraZ[2]
+            val cameraYaw = atan2(forwardZ.toDouble(), forwardX.toDouble())
+
+            // Get Vector from Camera to Target Node
+            val toTargetX = (targetNode.x - startNode.x) - cameraPose.tx()
+            val toTargetZ = (targetNode.z - startNode.z) - cameraPose.tz()
+            val targetYaw = atan2(toTargetZ.toDouble(), toTargetX.toDouble())
+
+            // Calculate relative angle (-180 to 180)
+            var relativeAngle = Math.toDegrees(targetYaw - cameraYaw).toFloat()
+            while (relativeAngle > 180) relativeAngle -= 360f
+            while (relativeAngle < -180) relativeAngle += 360f
 
             when {
-                targetNode.type == "LIFT" -> {
-                    instructionText.text = "Enter the Lift (Distance: ${String.format("%.1f", distance)}m)"
+                targetNode.type == "LIFT" && distanceToTarget < 2.0f -> {
+                    instructionText.text = "Enter Lift"
+                    instructionIcon.setImageResource(android.R.drawable.ic_menu_directions)
+                    instructionIcon.rotation = 0f
                 }
-                targetNode.type == "STAIRS" -> {
-                    instructionText.text = "Climb stairs carefully (Distance: ${String.format("%.1f", distance)}m)"
+                relativeAngle > 45f && relativeAngle < 135f -> {
+                    instructionText.text = "Turn Right"
+                    instructionIcon.setImageResource(R.drawable.ic_turn_right)
+                    instructionIcon.rotation = 0f
                 }
-                currentPathIndex == path.size - 1 -> {
-                    instructionText.text = "Arriving at ${targetNode.name} in ${String.format("%.1f", distance)}m"
+                relativeAngle < -45f && relativeAngle > -135f -> {
+                    instructionText.text = "Turn Left"
+                    instructionIcon.setImageResource(R.drawable.ic_turn_left)
+                    instructionIcon.rotation = 0f
+                }
+                abs(relativeAngle) >= 135f -> {
+                    instructionText.text = "Turn Around"
+                    instructionIcon.setImageResource(android.R.drawable.ic_menu_revert)
+                    instructionIcon.rotation = 180f
                 }
                 else -> {
-                    instructionText.text = "Follow path: ${String.format("%.1f", remainingDistance)}m to go"
+                    instructionText.text = "Go Forward"
+                    instructionIcon.setImageResource(android.R.drawable.ic_menu_directions)
+                    instructionIcon.rotation = 0f
                 }
             }
         }
     }
-
-
-
-
-
 }
