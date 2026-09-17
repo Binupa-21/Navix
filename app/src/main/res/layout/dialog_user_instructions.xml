@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/dialog_gradient_bg"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="How to Sync"
+        android:textColor="#6B157A"
+        android:textSize="22sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="To begin navigation:"
+        android:textColor="#6B157A"
+        android:textSize="16sp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="1. Point the camera at the floor.\n2. Ensure the area has proper lighting.\n3. Move the phone slowly to help the system recognize the area."
+        android:textColor="#6B157A"
+        android:textSize="14sp"
+        android:lineSpacingExtra="4dp" />
+
+    <Button
+        android:id="@+id/btnGotIt"
+        style="@style/Widget.MaterialComponents.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="end"
+        android:layout_marginTop="16dp"
+        android:text="Got it"
+        android:textColor="#3C0D43"
+        android:textStyle="bold" />
+
+</LinearLayout>
