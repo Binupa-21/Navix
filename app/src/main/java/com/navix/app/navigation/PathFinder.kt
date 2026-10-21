@@ -20,19 +20,15 @@ class PathFinder {
     }
 
     // THE MAIN ALGORITHM
-    fun findPath(allNodes: List<Node>, startId: String, targetId: String, isWheelchair: Boolean = false): List<Node> {
+    fun findPath(allNodes: List<Node>, startId: String, targetId: String, @Suppress("UNUSED_PARAMETER") isWheelchair: Boolean = false): List<Node> {
 
-        // 1. Find the Start and Target objects in your list
-        val startNodeData = allNodes.find { it.id == startId } ?: return emptyList()
-        val targetNodeData = allNodes.find { it.id == targetId } ?: return emptyList()
-
-        // 2. Wrap all Nodes into "PathNodes" to track costs
+        // 1. Wrap all Nodes into "PathNodes" to track costs
         val pathNodeMap = allNodes.associate { it.id to PathNode(it) }
 
-        val startNode = pathNodeMap[startId]!!
-        val targetNode = pathNodeMap[targetId]!!
+        val startNode = pathNodeMap[startId] ?: return emptyList()
+        val targetNode = pathNodeMap[targetId] ?: return emptyList()
 
-        // 3. Setup the Open Set (Nodes to be checked) and Closed Set (Nodes already checked)
+        // 2. Setup the Open Set (Nodes to be checked) and Closed Set (Nodes already checked)
         val openSet = PriorityQueue<PathNode> { a, b -> a.fCost.compareTo(b.fCost) }
         val closedSet = HashSet<PathNode>()
 
@@ -41,9 +37,9 @@ class PathFinder {
         startNode.hCost = calculateDistance(startNode.node, targetNode.node)
         openSet.add(startNode)
 
-        // 4. Loop until we find the target
+        // 3. Loop until we find the target
         while (openSet.isNotEmpty()) {
-            val current = openSet.poll()
+            val current = openSet.poll() ?: break
 
             // FOUND IT! Retrace steps
             if (current.node.id == targetId) {

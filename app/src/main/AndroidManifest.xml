@@ -24,7 +24,7 @@
 
         <!-- 1. MENU ACTIVITY (Has the Intent Filter -> STARTS FIRST) -->
         <activity
-            android:name=".MenuActivity"
+            android:name=".ui.MenuActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -34,7 +34,8 @@
 
         <!-- 2. MAIN ACTIVITY (No Intent Filter -> Starts only when clicked) -->
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:exported="false" />
 
     </application>

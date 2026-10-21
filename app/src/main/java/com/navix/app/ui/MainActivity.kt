@@ -119,7 +119,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 5. MAIN UPDATE LOOP (Checking Cloud States & UI)
-        sceneView.onSessionUpdated = { session, frame ->
+        sceneView.onSessionUpdated = onSessionUpdated@{ session, frame ->
             latestFrame = frame
 
             // --- PROXIMITY MANAGER (Runs every 2 seconds) ---
@@ -617,8 +617,9 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 Toast.makeText(this@MainActivity, "Path Drawn.", Toast.LENGTH_SHORT).show()
             }
-        }
-    }
+            } // Close if
+        } // Close launch
+    } // Close drawPathInAR
 
 
     private fun clearPath() {
@@ -1189,5 +1190,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun updateProximityAnchors(session: com.google.ar.core.Session, cameraPose: com.google.ar.core.Pose) {
+        // TODO: Implement proximity logic to handle nearby anchors based on camera pose
     }
 }
